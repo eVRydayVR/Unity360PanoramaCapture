@@ -1,38 +1,43 @@
 Unity Script: 360 Panorama Capture
-Version 1.0 - 2015 June 6 (Unity 5.0.2)
+Version 1.1 - 2015 June 27 (Unity 5.1.0p1)
 
 Captures a 360-degree panorama of the player's in-game surroundings and saves/uploads it for later viewing.
 
-HOW TO USE
-----------
+SETUP
+-----
+
+NOTE: This plugin currently requires Unity 5.x.
 
 1. Create an empty game object and add the Capture Panorama script (CapturePanorama.cs) to it.
 2. Under Edit->Project Settings->Player->Other Settings->Optimization, set "Api Compatibility Level" from ".NET 2.0 Subset" to ".NET 2.0".
-3. If your application is a VR application using the Oculus VR plugin, uncomment the line "#define OVR_SUPPORT" at the top of CapturePanorama.cs.
+3. If your application is a VR application using the Oculus VR plugin, uncomment the line "#define OVR_SUPPORT" at the top of CapturePanorama.cs. If you are using Unity native VR support, this is unnecessary.
+4. Run your application. Press P to capture a panorama. Processing will run in the background and may take 30-90 seconds. When it completes, a sound will play and an 8192x4096 PNG file will be saved in the application directory.
+5. When you're ready, check the "Upload image" property to automatically upload all screenshots to the VRCHIVE panorama sharing website (http://alpha.vrchive.org).
 
-The feature will now be available. By default, it will be configured to save a 4096x2048 360-degree equirectangular panorama to your application directory at the current camera position when you press the "P" key. 
+If the procedure does not complete as expected, check the "Enable Debugging" property on the Capture Panorama script, build and run the application, and then send the resulting "output_log.txt" file from your data directory to the developer (eVRydayVR@gmail.com).
 
-When you press the "P" key the screen will fade to black and you will hear a sound indicating it is taking the panorama. It will then fade back in and begin to process the panorama in the background while play continues. When it is done processing and has saved the file to disk, it will play a second, different sound. If you press "P" and it is already processing a panorama, it will do nothing.
+REFERENCE
+---------
 
-When you're ready, check the "Upload image" property and set image format to JPEG to automatically upload all screenshots to the VRCHIVE panorama sharing website.
-
-Properties:
+Properties on the Capture Panorama script:
 
 * Panorama Name: Used as the prefix of the saved image filename. If "Upload Images" is enabled, this will appear in the title of the image on the web.
 
-* Quality Setting: If this is set to the name of one of your quality settings, that quality setting will be used during panorama capture. By default the quality setting will not be changed.
+* Quality Setting: If this is set to the name of one of your quality settings, that quality setting will be used during panorama capture. It is recommended to use the highest available quality setting. By default the same quality setting will be used as during regular play.
 
-* Screenshot Key: the key to press to take a screenshot. If you wish to handle your own input, set this to "None" and invoke the CaptureScreenshotAsync() method.
+* Screenshot Key (default "P"): the key to press to take a screenshot. If you wish to handle your own input, set this to "None" and invoke the CaptureScreenshotAsync() method from your script.
 
-* Image Format: Set to PNG, JPEG, or Both to determine what format(s) to save/upload the image file in. JPEG produces smaller filesize and is recommended for uploading but is much lower quality. If set to Both, both will be saved, and if Upload Images is selected, the JPEG image will be uploaded.
+* Image Format (default PNG): Set to PNG or JPEG to determine what format(s) to save/upload the image file in. JPEG produces smaller filesize but is much lower quality.
 
-* Panorama Width: Determines width of the resulting panorama image. Height of the image will be half this. Must be a power of 2; typical reasonable values are 2048, 4096, and 8192.
+* Panorama Width (between 4 and 32767, default 8192): Determines width of the resulting panorama image. Height of the image will be half this. Typical reasonable values are 2048, 4096, and 8192.
 
 * Save Image Path: Directory where screenshots will be saved. If blank, the root application directory will be used.
 
-* Upload Images: Check to automatically publish panorama screenshots to VRCHIVE for sharing with others immediately after taking them. Visit alpha.vrchive.com to view them. Panoramas are currently uploaded anonymously (not under a user account). If this is checked, use of the JPEG format is recommended.
+* Upload Images (default off): Check to automatically publish panorama screenshots to VRCHIVE for sharing with others immediately after taking them. Visit alpha.vrchive.com to view them. Panoramas are currently uploaded anonymously (not under a user account).
 
-* Milliseconds Per Frame: The CPU milliseconds to spend each frame on processing the panorama. The higher this is the more the frame rate will be reduced during processing, but the faster the processing will complete. By default it is set to 8.33 ms (1/120th sec).
+* Use Default Orientation (default off): Resets the camera to the default (directly forward) rotation/orientation before taking the screenshot. May interfere with correct compositing if you have multiple cameras with different rotations. In VR applications, this is usually unnecessary because the headset orientation is used instead to correct the camera orientation.
+
+* Milliseconds Per Frame: The CPU milliseconds to spend each frame on processing the panorama. The higher this is the more the frame rate will be reduced during processing, but the faster the processing will complete. By default it is 8.33 ms (1/120th sec).
 
 * Start Sound: The sound played at the beginning of panorama processing. May be None.
 
@@ -48,13 +53,11 @@ Properties:
 
 Development notes:
 
-In OVR scenes the left eye will be used as the point of rendering. The package supports scenes with multiple cameras or OVR camera rigs, each with different culling masks. They will be composited based on depth to reproduce the player's view. Some effects such as camera shaders may not be reproduced.
+In scenes using the OVR plugin, the left eye will be used as the point of rendering. The package supports scenes with multiple cameras or OVR camera rigs, each with different culling masks. They will be composited based on depth to reproduce the player's view. Some effects such as camera shaders may not be reproduced.
 
 Only monoscopic panoramas, not stereoscopic panoramas, are currently supported. All views are rendered from the same point and there is no attempt to reproduce parallax.
 
 If you need to determine if a panorama capture is in process (e.g. to wait for the capture to complete), you can check the "Capturing" property.
-
-The game is not completely frozen while faded out and the player may still be able to move, etc. Modify your app if this is not desirable.
 
 If you want to produce video using this plugin, the key is to integrate it with a replay system. You should step through the replay one frame at a time, and for each frame invoke CaptureScreenshotAsync(). The resulting screenshots can be combined into a video using ffmpeg. This will work but will be very slow; I have a GPU-based shader which is faster but needs some work to fully prepare for a future release.
 

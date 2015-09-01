@@ -19,6 +19,9 @@ using ImageLockMode = System.Drawing.Imaging.ImageLockMode;
 using PixelFormat = System.Drawing.Imaging.PixelFormat;
 using Process = System.Diagnostics.Process;
 using Rectangle = System.Drawing.Rectangle;
+#if UNITY_5_1
+using UnityEngine.VR;
+#endif
 
 public class CapturePanorama : MonoBehaviour
 {
@@ -26,9 +29,10 @@ public class CapturePanorama : MonoBehaviour
     public string qualitySetting;
     public KeyCode screenshotKey = KeyCode.P;
     public ImageFormat imageFormat = ImageFormat.PNG;
-    public int panoramaWidth = 4096;
+    public int panoramaWidth = 8192;
     public string saveImagePath = "";
     public bool uploadImages = false;
+    public bool useDefaultOrientation = false;
     public float millisecondsPerFrame = 1000.0f/120.0f;
     public AudioClip startSound;
     public AudioClip doneSound;
@@ -38,25 +42,33 @@ public class CapturePanorama : MonoBehaviour
     public Material fadeMaterial = null;
     public bool enableDebugging = false;
 
-    public enum ImageFormat { JPEG, PNG, Both };
+    public enum ImageFormat { JPEG, PNG };
     internal string filenameSuffix;
 
     string apiUrl = "http://alpha.vrchive.com/api/1/";
     string apiKey = "0b26e4dca20793a83fd92ad83e3e859e";
 
-    GameObject go;
+    GameObject go = null;
     Camera cam;
-    Texture2D[] cubemapTexs;
+    Texture2D[] cubemapTexs = null;
 
     CubemapFace[] faces;
-    int panoramaHeight, cubemapSize;
+    int lastConfiguredPanoramaWidth, panoramaHeight, cubemapSize;
     RenderTexture cubemapRenderTexture = null;
     byte[] imageFileBytes;
 
     void Start()
     {
+        Reinitialize();
+    }
+
+    void Reinitialize() {
+        lastConfiguredPanoramaWidth = panoramaWidth;
         panoramaHeight = panoramaWidth / 2;
         cubemapSize = panoramaWidth / 4;
+
+        if (go != null)
+            Destroy(go);
 
         go = new GameObject("CubemapCamera");
         go.AddComponent<Camera>();
@@ -70,12 +82,21 @@ public class CapturePanorama : MonoBehaviour
 			CubemapFace.PositiveY, CubemapFace.NegativeY,
 			CubemapFace.PositiveZ, CubemapFace.NegativeZ };
 
+        if (cubemapTexs != null) {
+            foreach (Texture2D tex in cubemapTexs) {
+                Destroy(tex);
+            }
+        }
+
         cubemapTexs = new Texture2D[6];
         foreach (CubemapFace face in faces)
         {
             cubemapTexs[(int)face] = new Texture2D(cubemapSize, cubemapSize, TextureFormat.RGB24, /*mipmap*/false, /*linear*/true);
         }
 
+        if (cubemapRenderTexture != null)
+            Destroy(cubemapRenderTexture);
+            
         cubemapRenderTexture = new RenderTexture(cubemapSize, cubemapSize, 24, RenderTextureFormat.ARGB32);
         cubemapRenderTexture.Create();
     }
@@ -88,6 +109,11 @@ public class CapturePanorama : MonoBehaviour
 
     void Update()
     {
+        if (panoramaWidth <= 3) // Can occur temporarily while modifying Panorama Width property in editor
+            return;
+        if (panoramaWidth != lastConfiguredPanoramaWidth) {
+            Reinitialize();
+        }
         if (screenshotKey != KeyCode.None && Input.GetKeyDown(screenshotKey) && !Capturing)
         {
             Log("Panorama capture key pressed");
@@ -193,11 +219,17 @@ public class CapturePanorama : MonoBehaviour
             Debug.LogError("Quality setting specified for CapturePanorama is invalid, ignoring.", this);
         }
 
-#if OVR_SUPPORT
         Quaternion headOrientation = Quaternion.identity;
+#if OVR_SUPPORT
         if (OVRManager.display != null)
         {
             headOrientation = OVRManager.display.GetHeadPose(0.0).orientation;
+        }
+#endif
+#if UNITY_5_1
+        if (VRSettings.enabled && VRSettings.loadedDevice != VRDeviceType.None)
+        {
+            headOrientation = InputTracking.GetLocalRotation(0);
         }
 #endif
 
@@ -224,9 +256,11 @@ public class CapturePanorama : MonoBehaviour
                 cam.fieldOfView = 90.0f;
 
                 var baseRotation = c.transform.rotation;
-#if OVR_SUPPORT
                 baseRotation *= Quaternion.Inverse(headOrientation);
-#endif
+                if (useDefaultOrientation)
+                {
+                    baseRotation = Quaternion.identity;
+                }
 
                 // Don't use RenderToCubemap - it causes problems with compositing multiple cameras, and requires
                 // more temporary VRAM. Just render cube map manually.
@@ -292,34 +326,29 @@ public class CapturePanorama : MonoBehaviour
         }
         
         string filePath = "";
-        foreach (var format in new ImageFormat[] { ImageFormat.PNG, ImageFormat.JPEG }) // Last one in list will be used for upload
-        {
-            if (imageFormat != format && imageFormat != ImageFormat.Both)
-                continue;
 
-            string suffix = filenameSuffix + ((format == ImageFormat.JPEG) ? ".jpg" : ".png");
-            filePath = imagePath + "/" + filenamePrefix + suffix;
-            var thread = new Thread(() =>
+        string suffix = filenameSuffix + ((imageFormat == ImageFormat.JPEG) ? ".jpg" : ".png");
+        filePath = imagePath + "/" + filenamePrefix + suffix;
+        var thread = new Thread(() =>
+        {
+            Log("Saving equirectangular image");
+            if (imageFormat == ImageFormat.JPEG)
             {
-                Log("Saving equirectangular image");
-                if (format == ImageFormat.JPEG)
-                {
-                    // Try to set JPEG quality to max - doesn't do anything on my system but worth a shot.
-                    // TODO: Use better image processing library to get decent JPEG quality out.
-                    // Based on http://stackoverflow.com/questions/1484759/quality-of-a-saved-jpg-in-c-sharp
-                    var encoder = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
-                    var encParams = new System.Drawing.Imaging.EncoderParameters() { Param = new[] { new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 100L) } };
-                    bitmap.Save(filePath, encoder, encParams);
-                }
-                else
-                {
-                    bitmap.Save(filePath, DrawingImageFormat.Png);
-                }
-            });
-            thread.Start();
-            while (thread.ThreadState == ThreadState.Running)
-                yield return null;
-        }
+                // Try to set JPEG quality to max - doesn't do anything on my system but worth a shot.
+                // TODO: Use better image processing library to get decent JPEG quality out.
+                // Based on http://stackoverflow.com/questions/1484759/quality-of-a-saved-jpg-in-c-sharp
+                var encoder = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
+                var encParams = new System.Drawing.Imaging.EncoderParameters() { Param = new[] { new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 100L) } };
+                bitmap.Save(filePath, encoder, encParams);
+            }
+            else
+            {
+                bitmap.Save(filePath, DrawingImageFormat.Png);
+            }
+        });
+        thread.Start();
+        while (thread.ThreadState == ThreadState.Running)
+            yield return null;
 
         if (uploadImages)
         {
