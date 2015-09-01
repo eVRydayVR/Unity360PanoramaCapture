@@ -546,9 +546,12 @@ namespace CapturePanorama
             List<ScreenFadeControl> fadeControls = new List<ScreenFadeControl>();
             foreach (Camera c in Camera.allCameras)
             {
-                var fadeControl = c.gameObject.AddComponent<ScreenFadeControl>();
-                fadeControl.fadeMaterial = fadeMaterial;
-                fadeControls.Add(fadeControl);
+                if (c.isActiveAndEnabled && c.targetTexture == null) // Is a camera visible to the player
+                {
+                    var fadeControl = c.gameObject.AddComponent<ScreenFadeControl>();
+                    fadeControl.fadeMaterial = fadeMaterial;
+                    fadeControls.Add(fadeControl);
+                }
             }
             SetFadersEnabled(fadeControls, false);
 
