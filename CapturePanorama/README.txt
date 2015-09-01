@@ -125,9 +125,9 @@ CONFIG FILE
 
 The ReadPanoConfig script allows users to modify panorama capture parameters in a build without modifying the source Unity project. To use it:
 
-1. Add the ReadPanoConfig.cs script to the same object as the CapturePanorama.cs script.
-2. Modify the included asset "CapturePanorama.ini" as needed for your application. WARNING: This will override any settings supplied in the Inspector.
-3. After building, add the asset "CapturePanorama.ini" to the data directory of your build.
+1. Add the ReadPanoConfig.cs script to the same object as the CapturePanorama.cs script. WARNING: This will override any settings supplied in the Inspector with those in the INI file.
+2. Modify the included asset "CapturePanorama.ini" under the "Config" folder as needed for your application.
+3. After building, copy the asset "CapturePanorama.ini" to the data directory of your build.
 4. To modify settings, modify the .ini file and restart the application.
 
 DEVELOPMENT NOTES

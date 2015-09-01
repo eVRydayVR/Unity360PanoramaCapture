@@ -1,12 +1,12 @@
-﻿using UnityEngine;
-using UnityEngine.EventSystems;
+﻿// This is free and unencumbered software released into the public domain.
+// For more information, please refer to <http://unlicense.org/>
+
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
-using System.Text;
+using UnityEngine;
 
-namespace Assets.CapturePanorama
+namespace CapturePanorama.Internals
 {
     class ImageEffectCopyCamera : MonoBehaviour
     {
