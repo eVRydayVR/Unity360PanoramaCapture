@@ -61,7 +61,7 @@ public class CapturePanorama : MonoBehaviour
     string apiUrl = "http://alpha.vrchive.com/api/1/";
     string apiKey = "0b26e4dca20793a83fd92ad83e3e859e";
 
-    GameObject go = null;
+    GameObject go = null, camGo = null;
     Camera cam;
     Texture2D[] cameraTexs = null;
     RenderTexture[] cameraRenderTextures = null;
@@ -142,11 +142,19 @@ public class CapturePanorama : MonoBehaviour
         if (go != null)
             Destroy(go);
 
-        go = new GameObject("CubemapCamera");
-        go.AddComponent<Camera>();
+        go = new GameObject("PanoramaCaptureCameraContainer");
         go.hideFlags = HideFlags.HideAndDontSave;
 
-        cam = go.GetComponent<Camera>();
+        if (camGo != null)
+            Destroy(camGo);
+
+        // Create child so we can set position/rotation as an offset
+        camGo = new GameObject("PanoramaCaptureCamera");
+        camGo.transform.parent = go.transform;
+        camGo.AddComponent<Camera>();
+        camGo.hideFlags = HideFlags.HideAndDontSave;
+
+        cam = camGo.GetComponent<Camera>();
         cam.enabled = false;
 
         int numCameras = faces.Length;
@@ -459,6 +467,8 @@ public class CapturePanorama : MonoBehaviour
                 if (c.gameObject.name.Contains("RightEye"))
                     continue; // Only render left eyes
 
+                // TODO: Support scaling of camera properly
+                // TODO: Adjust near clip in stereoscopic mode based on circleRadius
                 go.transform.position = c.transform.position;
 
                 cam.clearFlags = c.clearFlags;
@@ -468,12 +478,12 @@ public class CapturePanorama : MonoBehaviour
                 cam.farClipPlane = c.farClipPlane;
                 cam.renderingPath = c.renderingPath;
                 cam.hdr = c.hdr;
-                
-                var baseRotation = c.transform.rotation;
-                baseRotation *= Quaternion.Inverse(headOrientation);
+
+                go.transform.rotation = c.transform.rotation;
+                go.transform.rotation *= Quaternion.Inverse(headOrientation);
                 if (useDefaultOrientation)
                 {
-                    baseRotation = Quaternion.identity;
+                    go.transform.rotation = Quaternion.identity;
                 }
 
                 // Don't use RenderToCubemap - it causes problems with compositing multiple cameras, and requires
@@ -492,12 +502,12 @@ public class CapturePanorama : MonoBehaviour
                 {
                     switch ((CubemapFace)i)
                     {
-                        case CubemapFace.PositiveX: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 90.0f, 0.0f); break;
-                        case CubemapFace.NegativeX: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, -90.0f, 0.0f); break;
-                        case CubemapFace.PositiveY: cam.transform.localRotation = baseRotation * Quaternion.Euler(90.0f, 0.0f, 0.0f); break;
-                        case CubemapFace.NegativeY: cam.transform.localRotation = baseRotation * Quaternion.Euler(-90.0f, 0.0f, 0.0f); break;
-                        case CubemapFace.PositiveZ: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 0.0f, 0.0f); break;
-                        case CubemapFace.NegativeZ: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 180.0f, 0.0f); break;
+                        case CubemapFace.PositiveX: cam.transform.localRotation = Quaternion.Euler(0.0f, 90.0f, 0.0f); break;
+                        case CubemapFace.NegativeX: cam.transform.localRotation = Quaternion.Euler(0.0f, -90.0f, 0.0f); break;
+                        case CubemapFace.PositiveY: cam.transform.localRotation = Quaternion.Euler(90.0f, 0.0f, 0.0f); break;
+                        case CubemapFace.NegativeY: cam.transform.localRotation = Quaternion.Euler(-90.0f, 0.0f, 0.0f); break;
+                        case CubemapFace.PositiveZ: cam.transform.localRotation = Quaternion.Euler(0.0f, 0.0f, 0.0f); break;
+                        case CubemapFace.NegativeZ: cam.transform.localRotation = Quaternion.Euler(0.0f, 180.0f, 0.0f); break;
                     }
                 }
 
