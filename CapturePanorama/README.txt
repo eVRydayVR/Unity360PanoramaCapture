@@ -136,11 +136,22 @@ The ReadPanoConfig script allows users to modify panorama capture parameters in 
 DEVELOPMENT NOTES
 -----------------
 
-In scenes using the OVR plugin, the left eye will be used as the point of rendering. The package supports scenes with multiple cameras or OVR camera rigs, each with different culling masks. They will be composited based on depth to reproduce the player's view.
+To extend the tool as needed for your application, you can subclass CapturePanorama.CapturePanorama and override virtual methods:
+
+* OnCaptureStart(): Called at the very beginning of each capture
+* GetCaptureCameras(): Allows you to control the set of cameras rendered to produce the view
+* BeforeRenderPanorama(): Called right before rendering camera views
+* AfterRenderPanorama(): Called right after rendering camera views
+
+You can also provide your own MonoBehavior event handlers such as Start(), Update(), Awake(), etc. and then have them call the superclass version using "base.Start()", "base.Update()" etc. The use of subclassing will ease upgrading when future versions of the script are released.
+
+In scenes using the OVR plugin, the left eye will be used by default as the point of rendering.
+
+The package supports scenes with multiple cameras or OVR camera rigs, each with different culling masks. They will be composited based on depth to reproduce the player's view.
 
 In some cases the stereo camera may clip into surrounding objects. Reduce near clip or move the camera farther away to alleviate this.
 
-As of version 1.3 image effects will be reproduced.
+As of version 1.3 camera image effects will be reproduced.
 
 If you need to determine if a panorama capture is in process (e.g. to wait for the capture to complete), you can check the "Capturing" property.
 
