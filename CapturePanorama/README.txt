@@ -10,11 +10,11 @@ CAPTURING 360 IMAGES
 
 1. Create an empty game object and add the Capture Panorama script (CapturePanorama.cs) to it.
 2. Under Edit->Project Settings->Player->Other Settings->Optimization, set "Api Compatibility Level" from ".NET 2.0 Subset" to ".NET 2.0". If you don't do this, the script will work in editor but not in builds.
-3. If your application is a VR application using the Oculus VR plugin, uncomment the line "#define OVR_SUPPORT" at the top of CapturePanorama.cs. If you are using Unity native VR support, this is unnecessary.
+3. If your application is a VR application using the old Oculus VR plugin, uncomment the line "#define OVR_SUPPORT" at the top of CapturePanorama.cs. If you are using Unity native VR support (with or without Oculus Utils), this is unnecessary.
 4. Run your application. Press P to capture a panorama. A sound will play and the screen will fade to black. When it completes, a second sound will play and an 8192x4096 PNG file will be saved in the application directory. You can capture programmatically with CaptureScreenshotAsync().
 5. When you're ready, check the "Upload image" property to automatically upload all screenshots to the VRCHIVE panorama sharing website (http://alpha.vrchive.org).
 
-If the procedure does not complete as expected, check the "Enable Debugging" property on the Capture Panorama script, build and run the application, and then send the resulting "output_log.txt" file from your data directory to the developer (eVRydayVR@gmail.com).
+If the procedure does not complete as expected, check the "Enable Debugging" property on the Capture Panorama script, build and run the application, and then send the resulting image if any and "output_log.txt" file from your data directory to the developer (eVRydayVR@gmail.com).
 
 RECORDING 360 VIDEOS
 --------------------
@@ -80,7 +80,7 @@ Properties on the Capture Panorama script:
 
 * Panorama Width (between 4 and 23800, default 8192): Determines width of the resulting panorama image. Height of the image will be half this. Typical reasonable values are 4096 and 8192. Need not be a power of two. At large values, black bars may appear in output images, indicating graphics memory has been exhausted.
 
-* Anti Aliasing (default 8): Sets the MSAA anti-aliasing quality to use during rendering.
+* Anti Aliasing (default 8): Sets the MSAA anti-aliasing quality to use during rendering. Set to 1 if using deferred rendering.
 
 * Ssaa Factor (default 1): Set to a larger value such as 2, 3, or 4 to render at a higher resolution and then downsample to produce the final image. Produces superior anti-aliasing at a large performance cost. In stereoscopic mode, Ssaa Factor > 1 uses more graphics memory.
 
@@ -134,6 +134,8 @@ DEVELOPMENT NOTES
 -----------------
 
 In scenes using the OVR plugin, the left eye will be used as the point of rendering. The package supports scenes with multiple cameras or OVR camera rigs, each with different culling masks. They will be composited based on depth to reproduce the player's view.
+
+In some cases the stereo camera may clip into surrounding objects. Reduce near clip or move the camera farther away to alleviate this.
 
 As of version 1.3 image effects will be reproduced.
 

@@ -52,8 +52,6 @@ public class CapturePanorama : MonoBehaviour
     public Material fadeMaterial = null;
     public ComputeShader convertPanoramaShader;
     public ComputeShader convertPanoramaStereoShader;
-    public ComputeShader copyShader;
-    public ComputeShader readRFloatTextureShader;
     public ComputeShader textureToBufferShader;
     public bool enableDebugging = false;
 
@@ -73,7 +71,7 @@ public class CapturePanorama : MonoBehaviour
     int panoramaHeight, cameraWidth, cameraHeight;
     RenderTexture cubemapRenderTexture = null;
     Texture2D forceWaitTexture;
-    int convertPanoramaKernelIdx = -1, convertPanoramaYPositiveKernelIdx = -1, convertPanoramaYNegativeKernelIdx = -1, copyKernelIdx = -1, readRFloatTextureIdx = -1, textureToBufferIdx = -1, renderStereoIdx = -1;
+    int convertPanoramaKernelIdx = -1, convertPanoramaYPositiveKernelIdx = -1, convertPanoramaYNegativeKernelIdx = -1, textureToBufferIdx = -1, renderStereoIdx = -1;
     int[] convertPanoramaKernelIdxs;
     byte[] imageFileBytes;
     string videoBaseName = "";
@@ -88,6 +86,7 @@ public class CapturePanorama : MonoBehaviour
     float tanHalfHFov, tanHalfVFov, hFovAdjust, vFovAdjust;
     int overlapTextures;
 
+    // If any of these change, have to call Reinitialize()
     int lastConfiguredPanoramaWidth, lastConfiguredNumCirclePoints, lastConfiguredSsaaFactor;
     float lastConfiguredInterpupillaryDistance;
     bool lastConfiguredCaptureStereoscopic, lastConfiguredSaveCubemap, lastConfiguredUseGpuTransform;
@@ -257,14 +256,6 @@ public class CapturePanorama : MonoBehaviour
             resultPixels = new uint[bitmapWidth * bitmapHeight];
         }
 
-        copyKernelIdx = copyShader.FindKernel("Copy");
-        copyShader.SetInt("width", cameraWidth);
-        copyShader.SetInt("height", cameraHeight);
-
-        readRFloatTextureIdx = readRFloatTextureShader.FindKernel("ReadRFloatTexture");
-        readRFloatTextureShader.SetInt("width", cameraWidth);
-        readRFloatTextureShader.SetInt("height", cameraHeight);
-
         textureToBufferIdx = textureToBufferShader.FindKernel("TextureToBuffer");
         textureToBufferShader.SetInt("width", cameraWidth);
         textureToBufferShader.SetInt("height", cameraHeight);
@@ -433,6 +424,25 @@ public class CapturePanorama : MonoBehaviour
                 yield return null; // If CaptureScreenshot() was called programmatically multiple times, serialize the coroutines
         Capturing = true;
 
+        // Have to refresh cameras each frame during video in case cameras or image effects change - consider an option for this.
+        var cameras = Camera.allCameras;
+        Array.Sort(cameras, (x, y) => x.depth.CompareTo(y.depth));
+        // Need to do this first in case we need to reinitialize
+        if (antiAliasing != AntiAliasing._1)
+        {
+            foreach (Camera c in cameras)
+            {
+                if (c.actualRenderingPath == RenderingPath.DeferredLighting ||
+                    c.actualRenderingPath == RenderingPath.DeferredShading)
+                {
+                    Debug.LogWarning("CapturePanorama: Setting Anti Aliasing=1 because at least one camera in deferred mode. Use SSAA setting or Antialiasing image effect if needed.");
+                    antiAliasing = AntiAliasing._1;
+                    Reinitialize();
+                    break;
+                }
+            }
+        }
+
         List<ScreenFadeControl> fadeControls = new List<ScreenFadeControl>();
         foreach (Camera c in Camera.allCameras)
         {
@@ -510,11 +520,7 @@ public class CapturePanorama : MonoBehaviour
         }
 #endif
 
-        // Have to refresh cameras each frame during video in case cameras or image effects change - consider an option for this.
-        var cameras = Camera.allCameras;
-        Array.Sort(cameras, (x, y) => x.depth.CompareTo(y.depth));
         Log("Rendering camera views");
-
         foreach (Camera c in cameras)
             Log("Camera name: " + c.gameObject.name);
 
