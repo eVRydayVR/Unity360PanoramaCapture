@@ -17,5 +17,5 @@ void Copy (uint3 id : SV_DispatchThreadID)
 {
     dest[id.xy] = source.SampleLevel(MyPointRepeatSampler, float2(((float)id.x + 0.5)/ width, ((float)id.y + 0.5)/ height), 0);
 	if (id.x == 0 && id.y == 0)
-	    forceWaitResultBuffer[0] = 5; // Used on CPU side to force a wait for this copy operation to complete
+	    forceWaitResultBuffer[0] = 1; // Used on CPU side to force a wait for this copy operation to complete
 }

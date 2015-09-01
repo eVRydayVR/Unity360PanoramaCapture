@@ -38,6 +38,12 @@ public class ReadPanoConfig : MonoBehaviour
                 pano.captureKey = (KeyCode)Enum.Parse(typeof(KeyCode), val);
             else if (key == "Image Format")
                 pano.imageFormat = (CapturePanorama.ImageFormat)Enum.Parse(typeof(CapturePanorama.ImageFormat), val);
+            else if (key == "Capture Stereoscopic")
+                pano.captureStereoscopic = bool.Parse(val);
+            else if (key == "Interpupillary Distance")
+                pano.interpupillaryDistance = float.Parse(val);
+            else if (key == "Num Circle Points")
+                pano.numCirclePoints = int.Parse(val);
             else if (key == "Panorama Width")
                 pano.panoramaWidth = int.Parse(val);
             else if (key == "Anti Aliasing")

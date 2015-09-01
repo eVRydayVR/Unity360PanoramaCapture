@@ -13,7 +13,8 @@ SamplerState MyLinearClampSampler;
 int equirectangularWidth;
 int equirectangularHeight;
 int ssaaFactor;
-int cubemapSize;
+int cameraWidth;
+int cameraHeight;
 int startY;
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
@@ -42,23 +43,24 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 
 			float distance;
 			float u, v;
-			float maxValue = 1.0f - 1.0f/cubemapSize;
+			float maxWidth  = 1.0f - 1.0f/cameraWidth;
+			float maxHeight = 1.0f - 1.0f/cameraHeight;
 
 			distance = 1.0f / equirectRayDirectionY;
 			u = equirectRayDirectionX * distance; v = equirectRayDirectionZ * distance;
 			if (u * u <= 1 && v * v <= 1) {
 				v = (v + 1.0f) * 0.5f;
-				v = min(v, maxValue);
+				v = min(v, maxHeight);
 				if (equirectRayDirectionY > 0.0f) {
 					u = (u + 1.0f) * 0.5f;
-					u = min(u, maxValue);
+					u = min(u, maxWidth);
 			
 					totalColor += cubemapFacePositiveY.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
 					continue;
 				} else {
 					u = -u;
 					u = (u + 1.0f) * 0.5f;
-					u = min(u, maxValue);
+					u = min(u, maxWidth);
 			
 					totalColor += cubemapFaceNegativeY.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
 					continue;
@@ -69,17 +71,17 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 			u = -equirectRayDirectionZ * distance; v = equirectRayDirectionY * distance;
 			if (u * u <= 1 && v * v <= 1) {
 				u = (u + 1.0f) * 0.5f;
-				u = min(u, maxValue);
+				u = min(u, maxWidth);
 				if (equirectRayDirectionX > 0.0f) {
 					v = -v;
 					v = (v + 1.0f) * 0.5f;
-					v = min(v, maxValue);
+					v = min(v, maxHeight);
 			
 					totalColor += cubemapFacePositiveX.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
 					continue;
 				} else {
 					v = (v + 1.0f) * 0.5f;
-					v = min(v, maxValue);
+					v = min(v, maxHeight);
 			
 					totalColor += cubemapFaceNegativeX.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
 					continue;
@@ -90,17 +92,17 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 			u = equirectRayDirectionX * distance; v = equirectRayDirectionY * distance;
 			if (u * u <= 1 && v * v <= 1) {
 				u = (u + 1.0f) * 0.5f;
-				u = min(u, maxValue);
+				u = min(u, maxWidth);
 				if (equirectRayDirectionZ > 0.0f) {
 					v = -v;
 					v = (v + 1.0f) * 0.5f;
-					v = min(v, maxValue);
+					v = min(v, maxHeight);
 			
 					totalColor += cubemapFacePositiveZ.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
 					continue;
 				} else {
 					v = (v + 1.0f) * 0.5f;
-					v = min(v, maxValue);
+					v = min(v, maxHeight);
 			
 					totalColor += cubemapFaceNegativeZ.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
 					continue;

@@ -1,0 +1,13 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel ReadRFloatTexture
+
+Texture2D<float> source;
+RWStructuredBuffer<float> result;
+int width, height;
+SamplerState MyPointRepeatSampler;
+
+[numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
+void ReadRFloatTexture (uint3 id : SV_DispatchThreadID)
+{
+    result[(id.x * height) + id.y] = source.SampleLevel(MyPointRepeatSampler, float2(((float)id.x + 0.5)/ width, ((float)id.y + 0.5)/ height), 0);
+}
