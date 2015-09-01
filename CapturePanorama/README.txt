@@ -3,13 +3,13 @@ Version 1.2 - 2015 July 24 (Unity 5.1.2f1)
 
 Captures a 360-degree panorama of the player's in-game surroundings and saves/uploads it for later viewing.
 
-NOTE: This plugin currently requires Unity 5.x.
+Requirements: This plugin currently requires Unity 5.x and a system supporting compute shaders. On PC, compute shaders require DirectX 11, Windows Vista or later, and a recent GPU capable of Shader Model 5.0.
 
 CAPTURING 360 IMAGES
 --------------------
 
 1. Create an empty game object and add the Capture Panorama script (CapturePanorama.cs) to it.
-2. Under Edit->Project Settings->Player->Other Settings->Optimization, set "Api Compatibility Level" from ".NET 2.0 Subset" to ".NET 2.0".
+2. Under Edit->Project Settings->Player->Other Settings->Optimization, set "Api Compatibility Level" from ".NET 2.0 Subset" to ".NET 2.0". If you don't do this, the script will work in editor but not in builds.
 3. If your application is a VR application using the Oculus VR plugin, uncomment the line "#define OVR_SUPPORT" at the top of CapturePanorama.cs. If you are using Unity native VR support, this is unnecessary.
 4. Run your application. Press P to capture a panorama. A sound will play and the screen will fade to black. When it completes, a second sound will play and an 8192x4096 PNG file will be saved in the application directory. You can capture programmatically with CaptureScreenshotAsync().
 5. When you're ready, check the "Upload image" property to automatically upload all screenshots to the VRCHIVE panorama sharing website (http://alpha.vrchive.org).
@@ -19,7 +19,7 @@ If the procedure does not complete as expected, check the "Enable Debugging" pro
 RECORDING 360 VIDEOS
 --------------------
 
-As of version 1.2, the "Capture Every Frame" option can be used to create 360 videos suitable for uploading to providers such as YouTube and Vrideo. Steps follow.
+As of version 1.2, the "Capture Every Frame" option can be used to create 360 videos suitable for uploading to providers such as YouTube and Vrideo, or for viewing in Virtual Desktop or Gear VR. Steps follow.
 
 Preparation:
 * Make sure your application is able to run correctly when "Time.captureFramerate" is set to your desired video frame rate. Modify code which depends on the real clock time, e.g. waiting for a certain amount of time to pass, or waiting for audio events to complete, to instead use Time.deltaTime in Update().
@@ -32,7 +32,7 @@ We will capture an image file for each frame of the video.
 1. Check "Capture Every Frame" and enter the desired frame for capture in "Frame Rate".
 2. The "BMP" image format provides the fastest capture. "PNG" will use less disk space.
 3. Set "Save Image Path" to a fast disk with sufficient capacity for the raw video frames.
-4. Set "Panorama Width" to the desired width of your video (typically 4096).
+4. Set "Panorama Width" to the desired width of your video. Test your playback environment to ensure it supports the video size. Typically mono uses 4096 or 3840 and stereo uses 2048, 2160, 2880, or 3048.
 5. Enable "Use Gpu Transform". Disable "Save Cubemap" unless you want cube map images for each frame.
 6. For highest quality with slower encoding, increase "Ssaa Factor" to 2, 3, or 4.
 7. Start the application and use the capture hotkey ("P" by default) to toggle between capturing and not capturing. You can also programmatically call StartCaptureEveryFrame() and StopCaptureEveryFrame().
@@ -57,6 +57,10 @@ Alternatively, in Adobe Premiere Pro you can import the sequence directly using 
 
 https://helpx.adobe.com/premiere-pro/using/importing-still-images.html#import_numbered_still_image_sequences_as_video_clips
 
+Once the video is created, add the audio track and edit as desired. For viewing in Virtual Desktop on Windows 8, be sure to render the final video at H.264 Level 5.1. For viewing on Gear VR, ensure no dimension exceeds 2160.
+
+Encoding during capture will be added in future versions.
+
 REFERENCE
 ---------
 
@@ -68,21 +72,23 @@ Properties on the Capture Panorama script:
 
 * Image Format (default PNG): Determines what format(s) to save/upload the image file in. JPEG produces smaller filesize but is much lower quality. BMP is faster to save than PNG but larger.
 
-* Capture Stereoscopic (default false): Captures a dual-360 top/bottom (over/under) image suitable for stereoscopic (3D) viewing. May produce artifacts such as ghosting/doubling.
+* Capture Stereoscopic (default false): Captures a top/bottom (over/under) image suitable for stereoscopic (3D) viewing. May produce artifacts. Generally you want to reduce Panorama Width when enabling this option.
 
 * Interpupillary Distance (stereoscopic only): Distance between the eye pupils of the viewer in meters. Defaults to average IPD from U.S. Army survey.
 
-* Num Circle Points (stereoscopic only): Determines at how many points to capture the surroundings. Smaller values are faster while larger values reduce ghosting/doubling artifacts on nearby objects.
+* Num Circle Points (stereoscopic only): Determines at how many points to capture the surroundings. Smaller values are faster while larger values reduce ghosting/doubling artifacts on nearby objects. Should increase when increasing Panorama Width.
 
-* Panorama Width (between 4 and 23800, default 8192): Determines width of the resulting panorama image. Height of the image will be half this. Typical reasonable values are 4096 and 8192. Need not be a power of two.
+* Panorama Width (between 4 and 23800, default 8192): Determines width of the resulting panorama image. Height of the image will be half this. Typical reasonable values are 4096 and 8192. Need not be a power of two. At large values, black bars may appear in output images, indicating graphics memory has been exhausted.
 
 * Anti Aliasing (default 8): Sets the MSAA anti-aliasing quality to use during rendering.
 
-* Ssaa Factor (default 1): Set to a larger value such as 2, 3, or 4 to render at a higher resolution and then downsample to produce the final image. Produces superior anti-aliasing at a large performance cost.
+* Ssaa Factor (default 1): Set to a larger value such as 2, 3, or 4 to render at a higher resolution and then downsample to produce the final image. Produces superior anti-aliasing at a large performance cost. In stereoscopic mode, Ssaa Factor > 1 uses more graphics memory.
 
 * Save Image Path: Directory where screenshots will be saved. If blank, the root application directory will be used.
 
 * Save Cubemap (default off): Check to save the six captured cubemap images to disk. Some viewing software can view these directly. Will increase capture time.
+
+In stereoscopic mode this option will save all captured camera images (stereo cubemaps are not yet supported). The images saved will be first the bottom and top images, then for each circle point it will save 4 images, one turned 45 degrees left, one turned 45 degrees right, one turned 45 degrees up, and one turned 45 degrees down. The viewing circle is about the origin and has diameter equal to IPD; the points are equally distributed.
 
 * Upload Images (default off): Check to automatically publish panorama screenshots to VRCHIVE for sharing with others immediately after taking them. Visit alpha.vrchive.com to view them. Panoramas are currently uploaded anonymously (not under a user account).
 
@@ -126,8 +132,6 @@ DEVELOPMENT NOTES
 -----------------
 
 In scenes using the OVR plugin, the left eye will be used as the point of rendering. The package supports scenes with multiple cameras or OVR camera rigs, each with different culling masks. They will be composited based on depth to reproduce the player's view. Some effects such as camera shaders may not be reproduced.
-
-Only monoscopic panoramas, not stereoscopic panoramas, are currently supported. All views are rendered from the same point and there is no attempt to reproduce parallax.
 
 If you need to determine if a panorama capture is in process (e.g. to wait for the capture to complete), you can check the "Capturing" property.
 

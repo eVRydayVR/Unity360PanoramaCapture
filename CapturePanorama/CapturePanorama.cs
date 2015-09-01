@@ -29,7 +29,7 @@ public class CapturePanorama : MonoBehaviour
     public ImageFormat imageFormat = ImageFormat.PNG;
     public bool captureStereoscopic = false;
     public float interpupillaryDistance = 0.0635f; // Average IPD of all subjects in US Army survey in meters
-    public int numCirclePoints = 32;
+    public int numCirclePoints = 128;
     public int panoramaWidth = 8192;
     public AntiAliasing antiAliasing = AntiAliasing._8;
     public int ssaaFactor = 1;
@@ -78,8 +78,11 @@ public class CapturePanorama : MonoBehaviour
     float hFov = -1.0f, vFov = -1.0f, hFovAdjustDegrees = -1.0f, vFovAdjustDegrees = -1.0f, circleRadius = -1.0f;
     int threadsX = 32, threadsY = 32; // Must match all shaders
     int numCameras;
+    const int CamerasPerCirclePoint = 4;
     uint[] cameraPixels = null;
     uint[] resultPixels = null;
+    float tanHalfHFov, tanHalfVFov, hFovAdjust, vFovAdjust;
+    int overlapTextures;
 
     int lastConfiguredPanoramaWidth, lastConfiguredSsaaFactor;
     bool lastConfiguredCaptureStereoscopic, lastConfiguredSaveCubemap, lastConfiguredUseGpuTransform;
@@ -120,7 +123,29 @@ public class CapturePanorama : MonoBehaviour
 
     void Start()
     {
+        if (!SystemInfo.supportsComputeShaders)
+        {
+            this.enabled = false;
+            Debug.LogError("CapturePanorama requires compute shaders. Your system does not support them. " +
+                "On PC, compute shaders require DirectX 11, Windows Vista or later, and a recent GPU capable of Shader Model 5.0.");
+            return;
+        }
         Reinitialize();
+    }
+
+    // A function from [-1, 1] to [0, 1] which has f(0)=1, f(-1)=f(1)=0,
+    // is symmetric around the y axis, and is smooth near x=0
+    float IpdScaleFunction(float latitudeNormalized)
+    {
+        // return 1.0f; // Most basic, has discontinuities at poles
+        // return 1 - latitudeNormalized * latitudeNormalized;
+
+        // First constant is 1/(1 - 1/e^(-1)), second constant is -e^(-1)/(1 - e^(-1)),
+        // necessary to satisfy f(0)=1 and f(-1)=f(1)=0.
+        return 1.5819767068693265f * Mathf.Exp(-latitudeNormalized * latitudeNormalized) - 0.5819767068693265f;
+
+        // return 1.1565176427496657f * Mathf.Exp(-2.0f * latitudeNormalized * latitudeNormalized) - 0.15651764274966568f;
+        // return 1.0000454019910097f * Mathf.Exp(-10.0f * latitudeNormalized * latitudeNormalized) - 0.00004540199100968779f;
     }
 
     void Reinitialize() {
@@ -174,16 +199,16 @@ public class CapturePanorama : MonoBehaviour
 
             // TODO: Use different hFov/vFov for top/bottom cameras and left/right cameras (vFov of top/bottom cameras especially is a lot less)
 
-            // Given our ipd adjustment curve 1-x^2, the IPD range of the top/bottom cameras will be only 0%-75%
-            // of the original IPD. Hence the necessary hFov is given by 2*(pi/2 - acos(0.75)) = about 97.2 deg.
+            // Given our ipd adjustment scaling f(x), the IPD range of the top/bottom cameras will be up to f(0.5)
+            // of the original IPD. Hence the necessary hFov is given by 2*(pi/2 - acos(f(0.5))), usually in the 90-115 deg range.
             float extraFovForRoundingErrors = 0.001f;
-            float hFovTopBottom = 2.0f * (Mathf.PI / 2.0f - Mathf.Acos(0.75f)) * 360.0f / (2.0f * Mathf.PI);
+            float hFovTopBottom = 2.0f * (Mathf.PI / 2.0f - Mathf.Acos(IpdScaleFunction(0.5f))) * 360.0f / (2.0f * Mathf.PI);
             hFov = Mathf.Max(90f + maxAngleError, hFovTopBottom) + extraFovForRoundingErrors; // These will usually be similar so just use max for simplicity
             vFov = 90.0f;
-            numCameras = numCirclePoints * 4;
+            numCameras = 2 + numCirclePoints * CamerasPerCirclePoint; // 2 + for top/bottom
             circleRadius = interpupillaryDistance / 2.0f;
             hFovAdjustDegrees = hFov / 2.0f;
-            vFovAdjustDegrees = vFov / 2.0f + 0.1f; // Add a little extra to make sure we cover poles well
+            vFovAdjustDegrees = vFov / 2.0f; // Add a little extra to make sure we cover poles well
         }
 
         double ppd90 = panoramaWidth * 90.0 / 360.0;
@@ -238,6 +263,28 @@ public class CapturePanorama : MonoBehaviour
         if (saveCubemap || !usingGpuTransform)
         {
             cameraPixels = new uint[numCameras * cameraWidth * cameraHeight]; // Allocate once to avoid GC fragmentation
+        }
+
+        tanHalfHFov = Mathf.Tan(hFov * (2 * Mathf.PI) / 360.0f / 2.0f);
+        tanHalfVFov = Mathf.Tan(vFov * (2 * Mathf.PI) / 360.0f / 2.0f);
+        hFovAdjust = hFovAdjustDegrees * (2 * Mathf.PI) / 360.0f;
+        vFovAdjust = vFovAdjustDegrees * (2 * Mathf.PI) / 360.0f;
+
+        if (captureStereoscopic && usingGpuTransform)
+        {
+            convertPanoramaStereoShader.SetFloat("tanHalfHFov", tanHalfHFov);
+            convertPanoramaStereoShader.SetFloat("tanHalfVFov", tanHalfVFov);
+            convertPanoramaStereoShader.SetFloat("hFovAdjust", hFovAdjust);
+            convertPanoramaStereoShader.SetFloat("vFovAdjust", vFovAdjust);
+            convertPanoramaStereoShader.SetFloat("interpupillaryDistance", interpupillaryDistance);
+            convertPanoramaStereoShader.SetFloat("circleRadius", circleRadius);
+            convertPanoramaStereoShader.SetInt("numCirclePoints", numCirclePoints);
+            convertPanoramaStereoShader.SetInt("equirectangularWidth", panoramaWidth);
+            convertPanoramaStereoShader.SetInt("equirectangularHeight", panoramaHeight);
+            convertPanoramaStereoShader.SetInt("cameraWidth", cameraWidth);
+            convertPanoramaStereoShader.SetInt("cameraHeight", cameraHeight);
+            convertPanoramaStereoShader.SetInt("ssaaFactor", ssaaFactor);
+
         }
     }
 
@@ -400,10 +447,20 @@ public class CapturePanorama : MonoBehaviour
                     convertPanoramaShader.SetBuffer(kernelIdx, "result", convertPanoramaResultBuffer);
             }
         }
-        ComputeBuffer cameraPixelsBuffer = new ComputeBuffer(/*count*/numCameras * cameraWidth * cameraHeight, /*stride*/4);
+        int cameraPixelsBufferNumTextures = numCameras;
+        overlapTextures = 0;
+        if (captureStereoscopic && usingGpuTransform)
+        {
+            overlapTextures = ssaaFactor == 1 ? 1 : 2;  // Overlap of 1 supports blending between circle points, overlap of 2 supports it even with SSAA at boundaries
+            // overlapTextures = ssaaFactor == 1 ? 1 : 2;  // Overlap of 1 supports blending between circle points, overlap of 2 supports it even with SSAA at boundaries
+            cameraPixelsBufferNumTextures = Math.Min(numCameras, 2 + CamerasPerCirclePoint * (1 + overlapTextures)); // 2 + for top/bottom
+        }
+        ComputeBuffer cameraPixelsBuffer = new ComputeBuffer(/*count*/cameraPixelsBufferNumTextures * cameraWidth * cameraHeight, /*stride*/4);
         textureToBufferShader.SetBuffer(textureToBufferIdx, "result", cameraPixelsBuffer);
+        convertPanoramaStereoShader.SetBuffer(renderStereoIdx, "cameraPixels", cameraPixelsBuffer);
         ComputeBuffer forceWaitResultBuffer = new ComputeBuffer(/*count*/1, /*stride*/4);
         copyShader.SetBuffer(copyKernelIdx, "forceWaitResultBuffer", forceWaitResultBuffer);
+        convertPanoramaStereoShader.SetBuffer(renderStereoIdx, "forceWaitResultBuffer", forceWaitResultBuffer);
 
         Log("Starting panorama capture");
         if (!captureEveryFrame && startSound != null)
@@ -429,7 +486,7 @@ public class CapturePanorama : MonoBehaviour
 
         var cameras = Camera.allCameras;
         Array.Sort(cameras, (x, y) => x.depth.CompareTo(y.depth));
-        Log("Rendering cubemap");
+        Log("Rendering camera views");
         cam.fieldOfView = vFov; // hFov inferred from aspect ratio of target
 
         // Need to extract each cubemap into a Texture2D so we can read the pixels, but Unity bug
@@ -437,7 +494,20 @@ public class CapturePanorama : MonoBehaviour
         // We copy the cubemap textures using a shader as a workaround.
         int[] forceWaitResult = new int[1];
 
-        for (int i=0; i < numCameras; i++)
+        string suffix = "." + FormatToExtension(imageFormat);
+        string filePath = "";
+        // Save in separate thread to avoid hiccups
+        string imagePath = saveImagePath;
+        if (imagePath == null || imagePath == "")
+        {
+            imagePath = Application.dataPath + "/..";
+        }
+
+        int circlePointCircularBufferSize = (cameraPixelsBufferNumTextures - 2) / CamerasPerCirclePoint;
+        convertPanoramaStereoShader.SetInt("circlePointCircularBufferSize", circlePointCircularBufferSize);
+        int nextCirclePointCircularBufferStart = 0, nextCirclePointStart = 0, writeIdx = 0;
+        int ilimit = numCameras + overlapTextures * CamerasPerCirclePoint;
+        for (int i = 0; i < ilimit; i++)
         {
             foreach (Camera c in cameras)
             {
@@ -466,13 +536,24 @@ public class CapturePanorama : MonoBehaviour
                 // more temporary VRAM. Just render cube map manually.
                 if (captureStereoscopic)
                 {
-                    int circlePointNum = i / 4;
-                    float circleAngle = 360.0f * circlePointNum / numCirclePoints;
-                    cam.transform.localPosition = Quaternion.Euler(0.0f, circleAngle, 0.0f) * Vector3.forward * circleRadius;
-                    if (i % 4 < 2)
-                        cam.transform.localRotation = Quaternion.Euler(0.0f, circleAngle + (i % 2 == 0 ? -hFovAdjustDegrees : hFovAdjustDegrees), 0.0f);
+                    if (i < 2)
+                    {
+                        // 0, 1 are top/bottom caps
+                        cam.transform.localPosition = Vector3.zero;
+                        cam.transform.localRotation = Quaternion.Euler((i == 0) ? 90.0f : -90.0f, 0.0f, 0.0f);
+                    }
                     else
-                        cam.transform.localRotation = Quaternion.Euler((i % 2 == 0 ? -vFovAdjustDegrees : vFovAdjustDegrees), circleAngle, 0.0f);
+                    {
+                        int circlePointNum = ((i - 2) / CamerasPerCirclePoint) % numCirclePoints;
+                        float circleAngle = 360.0f * circlePointNum / numCirclePoints;
+                        cam.transform.localPosition = Quaternion.Euler(0.0f, circleAngle, 0.0f) * Vector3.forward * circleRadius;
+
+                        int numInGroup = (i - 2) % CamerasPerCirclePoint;
+                        if (numInGroup < 2)
+                            cam.transform.localRotation = Quaternion.Euler(0.0f, circleAngle + (numInGroup == 0 ? -hFovAdjustDegrees : hFovAdjustDegrees), 0.0f);
+                        else
+                            cam.transform.localRotation = Quaternion.Euler((numInGroup == 2 ? -vFovAdjustDegrees : vFovAdjustDegrees), circleAngle, 0.0f);
+                    }
                 }
                 else
                 {
@@ -493,10 +574,41 @@ public class CapturePanorama : MonoBehaviour
             }
             
             textureToBufferShader.SetTexture(textureToBufferIdx, "source", cubemapRenderTexture);
-            textureToBufferShader.SetInt("startIdx", i * cameraWidth * cameraHeight);
+            textureToBufferShader.SetInt("startIdx", writeIdx * cameraWidth * cameraHeight);
             textureToBufferShader.Dispatch(textureToBufferIdx, (cameraWidth + threadsX - 1) / threadsX, (cameraHeight + threadsY - 1) / threadsY, 1);
-            // Get force wait result to force a wait for the shader to complete
-            forceWaitResultBuffer.GetData(forceWaitResult);
+
+            if (saveCubemap && i < numCameras)
+            {
+                // This is really slow - retrieving all cameraPixels data for just a portion of it. But this is mainly useful for debugging anyway.
+                cameraPixelsBuffer.GetData(cameraPixels);
+                SaveCubemapImage(cameraPixels, filenameBase, suffix, imagePath, i, writeIdx);
+            }
+            else
+            {
+                // Get force wait result to force a wait for the shader to complete
+                forceWaitResultBuffer.GetData(forceWaitResult);
+            }
+
+            writeIdx++;
+            if (writeIdx >= cameraPixelsBufferNumTextures) writeIdx = 2; // Leave top/bottom in indexes 0/1
+
+            // For stereoscopic GPU transform, interleave capture and rendering to decrease VRAM consumption
+            int circlePointsRendered = ((i - 2) + 1) / CamerasPerCirclePoint;
+            if (captureStereoscopic && usingGpuTransform &&
+                ((i - 2) + 1) % CamerasPerCirclePoint == 0 &&
+                circlePointsRendered >= circlePointCircularBufferSize &&
+                ((circlePointsRendered - circlePointCircularBufferSize) % (circlePointCircularBufferSize - overlapTextures) == 0 || i == ilimit - 1))
+            {
+                convertPanoramaStereoShader.SetInt("circlePointStart", nextCirclePointStart);
+                convertPanoramaStereoShader.SetInt("circlePointEnd", cameraPixelsBufferNumTextures < numCameras ? circlePointsRendered : circlePointsRendered + 1);
+                nextCirclePointStart = circlePointsRendered - overlapTextures;
+                convertPanoramaStereoShader.SetInt("circlePointCircularBufferStart", nextCirclePointCircularBufferStart);
+                nextCirclePointCircularBufferStart = (circlePointsRendered - overlapTextures) % circlePointCircularBufferSize;
+                convertPanoramaStereoShader.Dispatch(renderStereoIdx, (panoramaWidth + threadsX - 1) / threadsX, (panoramaHeight + threadsY - 1) / threadsY, 2);
+
+                // Get force wait result to force a wait for the shader to complete
+                forceWaitResultBuffer.GetData(forceWaitResult);
+            }
         }
 
         // If we need to access the cubemap pixels on the CPU, retrieve them now
@@ -507,62 +619,14 @@ public class CapturePanorama : MonoBehaviour
 
         RenderTexture.active = null;
 
-        string suffix = "." + FormatToExtension(imageFormat);
-        string filePath = "";
-        // Save in separate thread to avoid hiccups
-        string imagePath = saveImagePath;
-        if (imagePath == null || imagePath == "")
-        {
-            imagePath = Application.dataPath + "/..";
-        }
-
-        if (saveCubemap)
+        if (saveCubemap &&
+            !(captureStereoscopic && usingGpuTransform)) // In this mode images are saved during capture
         {
             // Save cubemap while still faded, as fast as possible - should be pretty quick
             for (int i = 0; i < numCameras; i++)
             {
-                {
-                    Bitmap bitmap = new Bitmap(cameraWidth, cameraHeight, PixelFormat.Format32bppArgb);
-                    var bmpData = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.WriteOnly, bitmap.PixelFormat);
-                    IntPtr ptr = bmpData.Scan0;
-                    byte[] pixelValues = new byte[Math.Abs(bmpData.Stride) * bitmap.Height];
-                    int stride = bmpData.Stride;
-                    int width = cameraWidth;
-                    int height = bmpData.Height;
-                    int inputIdx = i * cameraWidth * cameraHeight;
-                    for (int y = 0; y < cameraHeight; y++)
-                    {
-                        int outputIdx = stride * (height - 1 - y);
-                        for (int x = 0; x < cameraWidth; x++)
-                        {
-                            uint c = cameraPixels[inputIdx];
-                            pixelValues[outputIdx + 0] = (byte)( c        & 0xFF);
-                            pixelValues[outputIdx + 1] = (byte)((c >>  8) & 0xFF);
-                            pixelValues[outputIdx + 2] = (byte)( c >> 16        );
-                            pixelValues[outputIdx + 3] = 255;
-                            outputIdx += 4;
-                            inputIdx++;
-                        }
-                    }
-                    System.Runtime.InteropServices.Marshal.Copy(pixelValues, 0, ptr, pixelValues.Length);
-                    bitmap.UnlockBits(bmpData);
-
-                    string cameraId;
-                    if (captureStereoscopic)
-                    {
-                        cameraId = i.ToString();
-                        Log("Saving lightfield image for vertex " + cameraId);
-                    }
-                    else
-                    {
-                        cameraId = ((CubemapFace)i).ToString();
-                        Log("Saving cubemap image " + cameraId);
-                    }
-                    string cubeFilepath = imagePath + "/" + filenameBase + "_" + cameraId + suffix;
-                    // TODO: Use better image processing library to get decent JPEG quality out.
-                    bitmap.Save(cubeFilepath, FormatToDrawingFormat(imageFormat));
-                    bitmap.Dispose();
-                }
+                int bufferIdx = i;
+                SaveCubemapImage(cameraPixels, filenameBase, suffix, imagePath, i, bufferIdx);
             }
         }
 
@@ -654,6 +718,50 @@ public class CapturePanorama : MonoBehaviour
         }
     }
 
+    private void SaveCubemapImage(uint[] cameraPixels, string filenameBase, string suffix, string imagePath, int i, int bufferIdx)
+    {
+        Bitmap bitmap = new Bitmap(cameraWidth, cameraHeight, PixelFormat.Format32bppArgb);
+        var bmpData = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.WriteOnly, bitmap.PixelFormat);
+        IntPtr ptr = bmpData.Scan0;
+        byte[] pixelValues = new byte[Math.Abs(bmpData.Stride) * bitmap.Height];
+        int stride = bmpData.Stride;
+        int width = cameraWidth;
+        int height = bmpData.Height;
+        int inputIdx = bufferIdx * cameraWidth * cameraHeight;
+        for (int y = 0; y < cameraHeight; y++)
+        {
+            int outputIdx = stride * (height - 1 - y);
+            for (int x = 0; x < cameraWidth; x++)
+            {
+                uint c = cameraPixels[inputIdx];
+                pixelValues[outputIdx + 0] = (byte)(c & 0xFF);
+                pixelValues[outputIdx + 1] = (byte)((c >> 8) & 0xFF);
+                pixelValues[outputIdx + 2] = (byte)(c >> 16);
+                pixelValues[outputIdx + 3] = 255;
+                outputIdx += 4;
+                inputIdx++;
+            }
+        }
+        System.Runtime.InteropServices.Marshal.Copy(pixelValues, 0, ptr, pixelValues.Length);
+        bitmap.UnlockBits(bmpData);
+
+        string cameraId;
+        if (captureStereoscopic)
+        {
+            cameraId = i.ToString();
+            Log("Saving lightfield camera image number " + cameraId);
+        }
+        else
+        {
+            cameraId = ((CubemapFace)i).ToString();
+            Log("Saving cubemap image " + cameraId);
+        }
+        string cubeFilepath = imagePath + "/" + filenameBase + "_" + cameraId + suffix;
+        // TODO: Use better image processing library to get decent JPEG quality out.
+        bitmap.Save(cubeFilepath, FormatToDrawingFormat(imageFormat));
+        bitmap.Dispose();
+    }
+
     private Color32 GetCameraPixelBilinear(uint[] cameraPixels, int cameraNum, float u, float v)
     {
         u *= cameraWidth;
@@ -680,7 +788,7 @@ public class CapturePanorama : MonoBehaviour
         float b = Mathf.Lerp(Mathf.Lerp( topLeft         & 0xFF,  bottomLeft         & 0xFF, vFrac),
                              Mathf.Lerp( topRight        & 0xFF,  bottomRight        & 0xFF, vFrac), uFrac);
 
-        return new Color(r / 255.0f, g / 255.0f, b / 255.0f);
+        return new Color(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
     }
 
     internal void ClearProcessQueue()
@@ -726,31 +834,9 @@ public class CapturePanorama : MonoBehaviour
     IEnumerator CubemapToEquirectangular(ComputeBuffer cameraPixelsBuffer, uint[] cameraPixels, ComputeBuffer convertPanoramaResultBuffer, int cameraWidth, int cameraHeight, byte[] pixelValues,
         int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, bool async)
     {
-        float tanHalfHFov = Mathf.Tan(hFov * (2 * Mathf.PI) / 360.0f / 2.0f);
-        float tanHalfVFov = Mathf.Tan(vFov * (2 * Mathf.PI) / 360.0f / 2.0f);
-        float hFovAdjust = hFovAdjustDegrees * (2 * Mathf.PI) / 360.0f;
-        float vFovAdjust = vFovAdjustDegrees * (2 * Mathf.PI) / 360.0f;
-
         if (captureStereoscopic && usingGpuTransform)
         {
-            convertPanoramaStereoShader.SetBuffer(renderStereoIdx, "cameraPixels", cameraPixelsBuffer);
-            convertPanoramaStereoShader.SetFloat("tanHalfHFov", tanHalfHFov);
-            convertPanoramaStereoShader.SetFloat("tanHalfVFov", tanHalfVFov);
-            convertPanoramaStereoShader.SetFloat("hFovAdjust",  hFovAdjust);
-            convertPanoramaStereoShader.SetFloat("vFovAdjust",  vFovAdjust);
-            convertPanoramaStereoShader.SetFloat("interpupillaryDistance", interpupillaryDistance);
-            convertPanoramaStereoShader.SetFloat("circleRadius", circleRadius);
-            convertPanoramaStereoShader.SetInt("numCirclePoints", numCirclePoints);
-
-            convertPanoramaStereoShader.SetInt("equirectangularWidth", panoramaWidth);
-            convertPanoramaStereoShader.SetInt("equirectangularHeight", panoramaHeight);
-            convertPanoramaStereoShader.SetInt("cameraWidth", cameraWidth);
-            convertPanoramaStereoShader.SetInt("cameraHeight", cameraHeight);
-            convertPanoramaStereoShader.SetInt("ssaaFactor", ssaaFactor);
-
-            // TODO: slices for performance/saving VRAM 
-            convertPanoramaStereoShader.Dispatch(renderStereoIdx, (panoramaWidth + threadsX - 1) / threadsX, (panoramaHeight + threadsY - 1) / threadsY, 1);
-
+            // Was already done earlier, just grab the result
             convertPanoramaResultBuffer.GetData(resultPixels);
             writeOutputPixels(pixelValues, stride, panoramaWidth, panoramaHeight * 2, panoramaHeight * 2, /*yStart*/0);
         }
@@ -775,9 +861,39 @@ public class CapturePanorama : MonoBehaviour
 
                 // Scale IPD down as latitude moves toward poles to avoid discontinuities
                 float latitudeNormalized = latitude / (Mathf.PI / 2.0f); // Map to [-1, 1]
-                // Map from [-1, 1] to [0, 1] with curve 1 - x^2 that is smooth and symmetric at origin
-                float ipdScale = 1.0f - latitudeNormalized * latitudeNormalized;
+                float ipdScale = IpdScaleFunction(latitudeNormalized);
                 float scaledEyeRadius = ipdScale * interpupillaryDistance / 2.0f;
+
+                int cameraNum;
+                float u, v;
+
+                float ipdScaleLerp = 1.0f - ipdScale * 5.0f; // Scale [0, 0.2] to [0, 1] and reverse
+                // Top/bottom cap
+                Color colorCap = new Color(0.0f, 0.0f, 0.0f, 0.0f);
+                if (ipdScaleLerp > 0.0f)
+                {
+                    Vector3 equirectRayDirection = new Vector3(cosLat * sinLong, sinLat, cosLat * cosLong);
+                    float distance = 1.0f / equirectRayDirection.y;
+                    u = equirectRayDirection.x * distance; v = equirectRayDirection.z * distance;
+                    if (u * u <= 1 && v * v <= 1)
+                    {
+                        if (equirectRayDirection.y > 0.0f)
+                        {
+                            cameraNum = 0;
+                        }
+                        else
+                        {
+                            u = -u;
+                            cameraNum = 1;
+                        }
+
+                        u = (u + 1.0f) * 0.5f;
+                        v = (v + 1.0f) * 0.5f;
+
+                        colorCap = GetCameraPixelBilinear(cameraPixels, cameraNum, u, v);
+                    }
+                }
+
                 for (int i = 0; i < 2; i++)
                 {
                     // The following is equivalent to:
@@ -790,26 +906,17 @@ public class CapturePanorama : MonoBehaviour
                     if (i == 1) pos = -pos;
                     Vector3 dir = new Vector3(sinLong, 0.0f, cosLong);
 
-                    float eyeAngle = (i == 0 ? -Mathf.PI / 2 : Mathf.PI / 2) + longitude;
-                    float circlePointAngle = eyeAngle;
-                    if (ipdScale < 1.0f - 0.0001f) // Avoids some numerical issues
-                    {
-                        // Find place where gaze ray crosses circle (point on ray with magnitude equal to circleRadius)
-                        // (pos.x + dir.x * t)^2 + (pos.z + dir.z * t)^2 == circleRadius^2
-                        // Using unit magnitude of gazeDirection, positive solution is:
-                        float t = Mathf.Sqrt(circleRadius * circleRadius - dir.z * dir.z * pos.x * pos.x + 2 * dir.x * dir.z * pos.x * pos.z + (dir.z * dir.z - 1) * pos.z * pos.z) -
-                                    dir.x * pos.x - dir.z * pos.z;
-                        Vector3 circlePoint = pos + dir * t;
-                        Debug.Assert(Math.Abs(circlePoint.magnitude - circleRadius) < 0.01);
-                        circlePointAngle = Mathf.Atan2(circlePoint.x, circlePoint.z);
-                    }
+                    float angle = (Mathf.PI / 2.0f - Mathf.Acos(scaledEyeRadius / circleRadius));
+                    if (i == 0) angle = -angle;
+                    float circlePointAngle = longitude + angle;
                     if (circlePointAngle < 0.0f) circlePointAngle += 2 * Mathf.PI;
                     if (circlePointAngle >= 2 * Mathf.PI) circlePointAngle -= 2 * Mathf.PI;
-                    Debug.Assert(circlePointAngle >= 0.0f && circlePointAngle < 2 * Mathf.PI);
+                    // Debug.Assert(circlePointAngle >= 0.0f && circlePointAngle < 2 * Mathf.PI);
 
                     float circlePointNumber = circlePointAngle / (2 * Mathf.PI) * numCirclePoints;
                     int circlePoint0 = (int)Mathf.Floor(circlePointNumber) % numCirclePoints;
 
+                    // Get color from each adjacent circle point
                     Color color0 = new Color(), color1 = new Color();
                     for (int j=0; j < 2; j++)
                     {
@@ -821,7 +928,7 @@ public class CapturePanorama : MonoBehaviour
                         // Equivalent to (using fact that both dir and circlePointNorm are unit vectors):
                         // Quaternion circlePointRotation = Quaternion.Euler(0.0f, cameraPointAngle * 360.0f / (2 * Mathf.PI), 0.0f);
                         // Vector3 circlePointNormal = circlePointRotation * Vector3.forward;
-                        // float newLongitudeDegrees = Mathf.Sign(Vector3.Cross(circlePointNormal, dir).y) * Vector3.Angle(circlePointNormal, dir);
+                        // float newLongitude = Mathf.Sign(Vector3.Cross(circlePointNormal, dir).y) * Vector3.Angle(circlePointNormal, dir) * (2 * Mathf.PI) / 360.0f;
 
                         float newLongitude = Mathf.Sign(dir.x * cosCameraPointAngle - dir.z * sinCameraPointAngle) *
                                              Mathf.Acos(dir.z * cosCameraPointAngle + dir.x * sinCameraPointAngle);
@@ -829,9 +936,9 @@ public class CapturePanorama : MonoBehaviour
                         float sinNewLong = Mathf.Sin(newLongitude);
 
                         // Select which of the two cameras for this point to use and adjust ray to make camera plane perpendicular to axes
-                        int cameraNumBase = circlePointIdx * 4;
+                        int cameraNumBase = 2 + circlePointIdx * CamerasPerCirclePoint; // 2 + for top/bottom
 
-                        int cameraNum = cameraNumBase + (newLongitude >= 0.0f ? 1 : 0);
+                        cameraNum = cameraNumBase + (newLongitude >= 0.0f ? 1 : 0);
                         
                         float longitudeAdjust = (newLongitude >= 0.0f ? -hFovAdjust : hFovAdjust);
                         float longSum = newLongitude + longitudeAdjust;
@@ -841,8 +948,8 @@ public class CapturePanorama : MonoBehaviour
                         // Vector3 textureRayDirAdjusted = Quaternion.Euler(0.0f, longitudeAdjust * 360.0f / (2 * Mathf.PI), 0.0f) * textureRayDir;
                         Vector3 textureRayDirAdjusted = new Vector3(cosLat * Mathf.Sin(longSum), sinLat, cosLat * Mathf.Cos(longSum)); 
 
-                        float u =  textureRayDirAdjusted.x / textureRayDirAdjusted.z / tanHalfHFov;
-                        float v = -textureRayDirAdjusted.y / textureRayDirAdjusted.z / tanHalfVFov;
+                        u =  textureRayDirAdjusted.x / textureRayDirAdjusted.z / tanHalfHFov;
+                        v = -textureRayDirAdjusted.y / textureRayDirAdjusted.z / tanHalfVFov;
 
                         // There's a lot of vertical overlap so don't accept v near the edge of the left/right cameras, to avoid artifact pixels
                         if (! (textureRayDirAdjusted.z > 0.0f && u * u <= 1.0f && v * v <= 1.0f - 0.1f) )
@@ -860,7 +967,7 @@ public class CapturePanorama : MonoBehaviour
                             u =  textureRayDirAdjusted.x / textureRayDirAdjusted.z / tanHalfHFov;
                             v = -textureRayDirAdjusted.y / textureRayDirAdjusted.z / tanHalfVFov;
 
-                            Debug.Assert(textureRayDirAdjusted.z > 0.0f && u * u <= 1.0f && v * v <= 1.0f);
+                            // Debug.Assert(ipdScaleLerp >= 1.0 || (textureRayDirAdjusted.z > 0.0f && u * u <= 1.0f && v * v <= 1.0f));
                         }
 
                         u = (u + 1.0f) * 0.5f;
@@ -871,6 +978,8 @@ public class CapturePanorama : MonoBehaviour
                     }
 
                     Color32 c = Color.Lerp(color0, color1, circlePointNumber - Mathf.Floor(circlePointNumber));
+                    if (colorCap.a > 0.0f && ipdScaleLerp > 0.0f)
+                        c = Color.Lerp(c, colorCap, ipdScaleLerp);
 
                     int outputIdx = stride * (y + panoramaHeight * i) + x * 4;
                     pixelValues[outputIdx + 0] = c.b;

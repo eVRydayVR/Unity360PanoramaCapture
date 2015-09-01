@@ -34,7 +34,7 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 	{
 		for (int x = loopStart.x; x < loopEnd.x; x++)
 		{
-			float xcoord = (float)x / (equirectangularWidth * ssaaFactor);
+			float xcoord = (float)x / (equirectangularWidth  * ssaaFactor);
 			float ycoord = (float)y / (equirectangularHeight * ssaaFactor);
 			float latitude = (ycoord - 0.5f) * pi;
 			float longitude = (xcoord * 2.0f - 1.0f) * pi;
