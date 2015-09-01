@@ -35,12 +35,14 @@ public class CapturePanorama : MonoBehaviour
     public bool uploadImages = false;
     public bool useDefaultOrientation = false;
     public float millisecondsPerFrame = 1000.0f/120.0f;
+    public bool useGpuTransform = false;
     public AudioClip startSound;
     public AudioClip doneSound;
     public bool fadeDuringCapture = true;
     public float fadeTime = 0.25f;
     public Color fadeColor = new Color(0.0f, 0.0f, 0.0f, 1.0f);
     public Material fadeMaterial = null;
+    public ComputeShader convertPanoramaShader;
     public bool enableDebugging = false;
 
     public enum ImageFormat { JPEG, PNG };
@@ -53,9 +55,13 @@ public class CapturePanorama : MonoBehaviour
     Camera cam;
     Texture2D[] cubemapTexs = null;
 
+    bool usingGpuTransform;
     CubemapFace[] faces;
     int lastConfiguredPanoramaWidth, panoramaHeight, cubemapSize;
     RenderTexture cubemapRenderTexture = null;
+    RenderTexture equirectangularRenderTexture = null;
+    Texture2D equirectangularTexture;
+    int kernelIdx = -1;
     byte[] imageFileBytes;
 
     void Start()
@@ -100,6 +106,26 @@ public class CapturePanorama : MonoBehaviour
             
         cubemapRenderTexture = new RenderTexture(cubemapSize, cubemapSize, 24, RenderTextureFormat.ARGB32);
         cubemapRenderTexture.Create();
+
+        if (equirectangularRenderTexture != null)
+            Destroy(equirectangularRenderTexture);
+
+        if (equirectangularTexture != null)
+            Destroy(equirectangularTexture);
+
+        usingGpuTransform = useGpuTransform && convertPanoramaShader != null && SystemInfo.supportsComputeShaders;
+
+        if (usingGpuTransform)
+        {
+            equirectangularRenderTexture =
+                new RenderTexture(panoramaWidth, panoramaHeight, 0, RenderTextureFormat.ARGB32);
+            equirectangularRenderTexture.enableRandomWrite = true;
+            equirectangularRenderTexture.Create();
+
+            equirectangularTexture = new Texture2D(panoramaWidth, panoramaHeight, TextureFormat.RGB24, /*mipmap*/false, /*linear*/true);
+
+            kernelIdx = convertPanoramaShader.FindKernel("CubeMapToEquirectangular");
+        }
     }
 
     void Log(string s)
@@ -117,14 +143,15 @@ public class CapturePanorama : MonoBehaviour
         }
         if (screenshotKey != KeyCode.None && Input.GetKeyDown(screenshotKey) && !Capturing)
         {
-            Log("Panorama capture key pressed");
-            CaptureScreenshotAsync();
+            string filenameBase = String.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss-fff}", panoramaName, DateTime.Now);
+            Log("Panorama capture key pressed, capturing " + filenameBase);
+            CaptureScreenshotAsync(filenameBase);
         }
     }
 
-    public void CaptureScreenshotAsync()
+    public void CaptureScreenshotAsync(string filenameBase)
     {
-        StartCoroutine(CaptureScreenshotAsyncHelper());
+        StartCoroutine(CaptureScreenshotAsyncHelper(filenameBase));
     }
 
     internal bool Capturing;
@@ -172,7 +199,7 @@ public class CapturePanorama : MonoBehaviour
     }
 
 
-    public IEnumerator CaptureScreenshotAsyncHelper()
+    public IEnumerator CaptureScreenshotAsyncHelper(string filenameBase)
     {
         while (Capturing)
             yield return null; // If CaptureScreenshot() was called programmatically multiple times, serialize the coroutines
@@ -286,7 +313,6 @@ public class CapturePanorama : MonoBehaviour
         Log("Resetting quality level");
         QualitySettings.SetQualityLevel(saveQualityLevel, /*applyExpensiveChanges*/true);
 
-        string filenamePrefix = String.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss-fff}", panoramaName, DateTime.Now);
         string suffix = filenameSuffix + ((imageFormat == ImageFormat.JPEG) ? ".jpg" : ".png");
         string filePath = "";
         // Save in separate thread to avoid hiccups
@@ -324,7 +350,7 @@ public class CapturePanorama : MonoBehaviour
                 bitmap.UnlockBits(bmpData);
 
                 Log("Saving cubemap image " + face.ToString());
-                string cubeFilepath = imagePath + "/" + filenamePrefix + "_" + face.ToString() + suffix;
+                string cubeFilepath = imagePath + "/" + filenameBase + "_" + face.ToString() + suffix;
                 if (imageFormat == ImageFormat.JPEG)
                     // TODO: Use better image processing library to get decent JPEG quality out.
                     bitmap.Save(cubeFilepath, DrawingImageFormat.Jpeg);
@@ -339,27 +365,21 @@ public class CapturePanorama : MonoBehaviour
         for (int i = 0; i < 2; i++)
             yield return new WaitForEndOfFrame();
 
-        if (fadeDuringCapture)
+        if (!usingGpuTransform && fadeDuringCapture)
             yield return StartCoroutine(FadeIn(fadeControls));
-
-        foreach (ScreenFadeControl fadeControl in fadeControls)
-        {
-            Destroy(fadeControl);
-        }
-        fadeControls.Clear();
 
         // Convert to equirectangular projection - use compute shader for better performance if supported by platform
 
         // Write pixels directly to .NET Bitmap for saving out
         // Based on https://msdn.microsoft.com/en-us/library/5ey6h79d%28v=vs.110%29.aspx
-        filePath = imagePath + "/" + filenamePrefix + suffix;
+        filePath = imagePath + "/" + filenameBase + suffix;
         {
             Bitmap bitmap = new Bitmap(panoramaWidth, panoramaHeight, PixelFormat.Format32bppArgb);
             var bmpData = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.WriteOnly, bitmap.PixelFormat);
             IntPtr ptr = bmpData.Scan0;
             byte[] pixelValues = new byte[Math.Abs(bmpData.Stride) * bitmap.Height];
 
-            yield return StartCoroutine(CubemapToEquirectangularCpu(cubemapTexs, cubemapSize, pixelValues, bmpData.Stride, panoramaWidth, panoramaHeight));
+            yield return StartCoroutine(CubemapToEquirectangular(cubemapTexs, cubemapSize, pixelValues, bmpData.Stride, panoramaWidth, panoramaHeight));
 
             yield return null;
             System.Runtime.InteropServices.Marshal.Copy(pixelValues, 0, ptr, pixelValues.Length);
@@ -384,11 +404,20 @@ public class CapturePanorama : MonoBehaviour
             bitmap.Dispose();
         }
 
+        if (usingGpuTransform && fadeDuringCapture)
+            yield return StartCoroutine(FadeIn(fadeControls));
+
+        foreach (ScreenFadeControl fadeControl in fadeControls)
+        {
+            Destroy(fadeControl);
+        }
+        fadeControls.Clear();
+
         if (uploadImages)
         {
             Log("Uploading image");
             imageFileBytes = File.ReadAllBytes(filePath);
-            yield return StartCoroutine(UploadImage(imageFileBytes, filenamePrefix + ".jpg", "image/jpeg"));
+            yield return StartCoroutine(UploadImage(imageFileBytes, filenameBase + suffix, (imageFormat == ImageFormat.JPEG) ? "image/jpeg" : "image/png"));
         }
         else
         {
@@ -437,6 +466,55 @@ public class CapturePanorama : MonoBehaviour
                 AudioSource.PlayClipAtPoint(doneSound, transform.position);
             }
             Capturing = false;
+        }
+    }
+
+    IEnumerator CubemapToEquirectangular(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues,
+        int stride, int equirectangularWidth, int equirectangularHeight)
+    {
+        if (usingGpuTransform)
+        {
+            convertPanoramaShader.SetTexture(kernelIdx, "equirectangular", equirectangularRenderTexture);
+            foreach (CubemapFace face in faces)
+            {
+                convertPanoramaShader.SetTexture(kernelIdx, "cubemapFace" + face.ToString(), cubemapTexs[(int)face]);
+            }
+            convertPanoramaShader.SetInt("equirectangularWidth", equirectangularWidth);
+            convertPanoramaShader.SetInt("equirectangularHeight", equirectangularHeight);
+            convertPanoramaShader.SetInt("cubemapSize", cubemapSize);
+
+            convertPanoramaShader.SetInt("startX", 0);
+            convertPanoramaShader.SetInt("startY", 0);
+
+            // TODO: fix params here when renderTextureHeight/Width < panoWidth/HeightWithSsaa
+            convertPanoramaShader.Dispatch(kernelIdx, equirectangularWidth, equirectangularHeight, 1);
+
+            RenderTexture.active = equirectangularRenderTexture;
+            equirectangularTexture.ReadPixels(new Rect(0, 0, equirectangularWidth, equirectangularHeight), 0, 0);
+            equirectangularTexture.Apply();
+
+            // Copy to pixelValues output array
+            Color32[] texturePixels = equirectangularTexture.GetPixels32();
+            int inputIdx = 0;
+            for (int y = 0; y < equirectangularHeight; y++)
+            {
+                int outputIdx = stride * y;
+                for (int x = 0; x < equirectangularWidth; x++)
+                {
+                    Color32 c = texturePixels[inputIdx];
+                    pixelValues[outputIdx + 0] = c.b;
+                    pixelValues[outputIdx + 1] = c.g;
+                    pixelValues[outputIdx + 2] = c.r;
+                    pixelValues[outputIdx + 3] = c.a;
+                    outputIdx += 4;
+                    inputIdx++;
+                }
+            }
+        }
+        else
+        {
+            yield return StartCoroutine(CubemapToEquirectangularCpu(cubemapTexs, cubemapSize, pixelValues,
+                stride, equirectangularWidth, equirectangularHeight));
         }
     }
 
