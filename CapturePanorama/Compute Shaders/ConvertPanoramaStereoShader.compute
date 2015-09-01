@@ -3,16 +3,17 @@
 RWStructuredBuffer<uint> result;
 RWStructuredBuffer<uint> forceWaitResultBuffer;
 StructuredBuffer<uint> cameraPixels;
-int equirectangularWidth;
-int equirectangularHeight;
-int ssaaFactor;
-int cameraWidth;
-int cameraHeight;
+uint equirectangularWidth;
+uint equirectangularHeight;
+uint ssaaFactor;
+uint cameraWidth;
+uint cameraHeight;
 float tanHalfHFov, tanHalfVFov, hFovAdjust, vFovAdjust, interpupillaryDistance, circleRadius;
-int numCirclePoints;
-int circlePointStart, circlePointEnd, circlePointCircularBufferStart, circlePointCircularBufferSize;
-int leftRightPass;
-int forceWaitValue;
+uint numCirclePoints;
+uint circlePointStart, circlePointEnd, circlePointCircularBufferStart, circlePointCircularBufferSize;
+uint leftRightPass;
+uint forceWaitValue;
+uint cameraPixelsSentinelIdx;
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void RenderStereo (uint3 dtid : SV_DispatchThreadID)
@@ -20,20 +21,24 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 	if (dtid.x >= equirectangularWidth || dtid.y >= equirectangularHeight) // In case width/height not multiple of numthreads
 	    return;
 	if (dtid.x == equirectangularWidth - 1 && dtid.y == equirectangularHeight - 1 && dtid.z == 1)
+	{
 	    forceWaitResultBuffer[0] = forceWaitValue; // Used on CPU side to force a wait for this operation to complete
+		result[equirectangularWidth * equirectangularHeight * 2] =
+		    cameraPixels[cameraPixelsSentinelIdx]; // Sentinel value - set correctly only if set correctly in input buffer
+	}
 
 	static const float pi = 3.14159265f;
-	int2 pos = dtid.xy;
-	int2 loopStart = pos * ssaaFactor;
-	int2 loopEnd = loopStart + int2(ssaaFactor, ssaaFactor);
+	uint2 pos = dtid.xy;
+	uint2 loopStart = pos * ssaaFactor;
+	uint2 loopEnd = loopStart + uint2(ssaaFactor, ssaaFactor);
 
-	int i = dtid.z;
+	uint i = dtid.z;
 
 	float4 totalColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-	for (int y = loopStart.y; y < loopEnd.y; y++)
+	for (uint y = loopStart.y; y < loopEnd.y; y++)
 	{
-		for (int x = loopStart.x; x < loopEnd.x; x++)
+		for (uint x = loopStart.x; x < loopEnd.x; x++)
 		{
 			float xcoord = (float)x / (equirectangularWidth  * ssaaFactor);
 			float ycoord = (float)y / (equirectangularHeight * ssaaFactor);
@@ -74,13 +79,13 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 			if (circlePointAngle >= 2 * pi) circlePointAngle -= 2 * pi;
 
 			float circlePointNumber = circlePointAngle / (2 * pi) * numCirclePoints;
-			int circlePoint0 = (int)floor(circlePointNumber);
+			uint circlePoint0 = (uint)floor(circlePointNumber);
 			if (circlePoint0 < circlePointStart)
 			 	circlePoint0 += numCirclePoints; // Deal with an edge case when doing final slice with SSAA > 1
 			if (circlePoint0 < circlePointStart || circlePoint0 + 1 >= circlePointEnd)
 				return;
 
-            int cameraNum;
+            uint cameraNum;
             float u, v;
 
             float ipdScaleLerp = 1.0f - ipdScale * 5.0f; // Scale [0, 0.2] to [0, 1] and reverse
@@ -113,16 +118,16 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 
 					u *= cameraWidth;
 					v *= cameraHeight;
-					int left   = (int)floor(u);
-					int right  = min(cameraWidth  - 1, left + 1);
-					int top    = (int)floor(v);
-					int bottom = min(cameraHeight - 1, top  + 1);
+					uint left   = (uint)floor(u);
+					uint right  = min(cameraWidth  - 1, left + 1);
+					uint top    = (uint)floor(v);
+					uint bottom = min(cameraHeight - 1, top  + 1);
 					float uFrac = frac(u);
 					float vFrac = frac(v);
 
-					int baseIdx = cameraNum * cameraWidth * cameraHeight;
-					int topRow    = baseIdx + top    * cameraWidth;
-					int bottomRow = baseIdx + bottom * cameraWidth;
+					uint baseIdx = cameraNum * cameraWidth * cameraHeight;
+					uint topRow    = baseIdx + top    * cameraWidth;
+					uint bottomRow = baseIdx + bottom * cameraWidth;
 					uint topLeft     = cameraPixels[topRow    + left ];
 					uint topRight    = cameraPixels[topRow    + right];
 					uint bottomLeft  = cameraPixels[bottomRow + left ];
@@ -141,9 +146,9 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
             }
 
 			float4 color0 = float4(0, 0, 0, 0), color1 = float4(0, 0, 0, 0);
-			for (int j=0; j < 2; j++)
+			for (uint j=0; j < 2; j++)
 			{
-				int circlePointIdx = (circlePoint0 + j) % numCirclePoints;
+				uint circlePointIdx = (circlePoint0 + j) % numCirclePoints;
 				float cameraPointAngle = 2 * pi * circlePointIdx / numCirclePoints;
 				float sinCameraPointAngle, cosCameraPointAngle;
 				sincos(cameraPointAngle, sinCameraPointAngle, cosCameraPointAngle);
@@ -161,7 +166,7 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 
 				// Select which of the two cameras for this point to use and adjust ray to make camera plane perpendicular to axes
 				// 2 + because first two are top/bottom
-				int cameraNumBase = 2 + ((circlePoint0 + j + circlePointCircularBufferStart - circlePointStart) % circlePointCircularBufferSize) * 2;
+				uint cameraNumBase = 2 + ((circlePoint0 + j + circlePointCircularBufferStart - circlePointStart) % circlePointCircularBufferSize) * 2;
 
 				float3 textureRayDirAdjusted;
 
@@ -211,16 +216,16 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 
 				u *= cameraWidth;
 				v *= cameraHeight;
-				int left   = (int)floor(u);
-				int right  = min(cameraWidth  - 1, left + 1);
-				int top    = (int)floor(v);
-				int bottom = min(cameraHeight - 1, top  + 1);
+				uint left   = (uint)floor(u);
+				uint right  = min(cameraWidth  - 1, left + 1);
+				uint top    = (uint)floor(v);
+				uint bottom = min(cameraHeight - 1, top  + 1);
 				float uFrac = frac(u);
 				float vFrac = frac(v);
 
-				int baseIdx = cameraNum * cameraWidth * cameraHeight;
-				int topRow    = baseIdx + top    * cameraWidth;
-				int bottomRow = baseIdx + bottom * cameraWidth;
+				uint baseIdx = cameraNum * cameraWidth * cameraHeight;
+				uint topRow    = baseIdx + top    * cameraWidth;
+				uint bottomRow = baseIdx + bottom * cameraWidth;
 				uint topLeft     = cameraPixels[topRow    + left ];
 				uint topRight    = cameraPixels[topRow    + right];
 				uint bottomLeft  = cameraPixels[bottomRow + left ];
@@ -247,5 +252,5 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 
 	totalColor /= ssaaFactor * ssaaFactor;
 	result[((dtid.y + equirectangularHeight * i) * equirectangularWidth) + dtid.x] =
-		((int)totalColor.r << 16) | ((int)totalColor.g << 8) | (int)totalColor.b;
+		((uint)totalColor.r << 16) | ((uint)totalColor.g << 8) | (uint)totalColor.b;
 }

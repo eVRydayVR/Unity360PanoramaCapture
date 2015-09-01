@@ -4,10 +4,11 @@
 Texture2D<float4> source;
 RWStructuredBuffer<uint> result;
 RWStructuredBuffer<uint> forceWaitResultBuffer;
-int width, height;
+uint width, height;
 SamplerState MyPointRepeatSampler;
-int startIdx;
-int forceWaitValue;
+uint startIdx;
+uint sentinelIdx;
+uint forceWaitValue;
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void TextureToBuffer (uint3 id : SV_DispatchThreadID)
@@ -17,8 +18,11 @@ void TextureToBuffer (uint3 id : SV_DispatchThreadID)
 
 	float4 color = source.SampleLevel(MyPointRepeatSampler, float2(((float)id.x + 0.5)/ width, ((float)id.y + 0.5)/ height), 0);
 	color *= 255.0;
-	result[startIdx + (id.y * width) + id.x] = ((int)color.r << 16) | ((int)color.g << 8) | (int)color.b;
+	result[startIdx + (id.y * width) + id.x] = ((int)color.r << 16u) | ((int)color.g << 8u) | (int)color.b;
 
-	if (id.x == width - 1 && id.y == height - 1 && id.z == 0)
+	if (id.x == width - 1u && id.y == height - 1u && id.z == 0u)
+	{
         forceWaitResultBuffer[0] = forceWaitValue; // Used on CPU side to force a wait for this operation to complete
+		result[sentinelIdx] = 1419455993u; // Sentinel value - must match BufferSentinelValue in CapturePanorama.cs
+	}
 }

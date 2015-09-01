@@ -76,9 +76,9 @@ Properties on the Capture Panorama script:
 
 * Interpupillary Distance (stereoscopic only): Distance between the eye pupils of the viewer in Unity units. Defaults to average IPD in meters from U.S. Army survey.
 
-* Num Circle Points (stereoscopic only): Determines at how many points to capture the surroundings. Smaller values are faster while larger values reduce ghosting/doubling artifacts on nearby objects. A good starting point is Panorama Width divided by 32.
+* Num Circle Points (at least 8, stereoscopic only): Determines at how many points to capture the surroundings. Smaller values are faster while larger values reduce ghosting/doubling artifacts on nearby objects. A good starting point is Panorama Width divided by 32. Smaller values also counterintuitively require more graphics memory, while larger values require less.
 
-* Panorama Width (between 4 and 23800, default 8192): Determines width of the resulting panorama image. Height of the image will be half this. Typical reasonable values are 4096 and 8192. Need not be a power of two. At large values, black bars may appear in output images, indicating graphics memory has been exhausted.
+* Panorama Width (between 4 and 23800, default 8192): Determines width of the resulting panorama image. Height of the image will be half this in mono mode, or equal to this in stereo mode. Typical reasonable values are 4096 and 8192. Need not be a power of two. If this is too large, black bars may appear in output images, indicating graphics memory has been exhausted.
 
 * Anti Aliasing (default 8): Sets the MSAA anti-aliasing quality to use during rendering. Set to 1 if using deferred rendering.
 
@@ -88,7 +88,7 @@ Properties on the Capture Panorama script:
 
 * Save Cubemap (default off): Check to save the six captured cubemap images to disk. Some viewing software can view these directly. Will increase capture time.
 
-In stereoscopic mode this option will save all captured camera images (stereo cubemaps are not yet supported). The images saved will be first the bottom and top images, then for each circle point it will save 4 images, one turned 45 degrees left, one turned 45 degrees right, one turned 45 degrees up, and one turned 45 degrees down. The viewing circle is about the origin and has diameter equal to IPD; the points are equally distributed.
+In stereoscopic mode this option will save all captured camera images (stereo cubemaps are not yet supported). The images saved will be first the bottom and top images, then for each circle point it will save 2 images, one turned left 45 degrees and one turned right 45 degrees. Then again for each circle point it will save 2 images, one turned up 45 degrees and one turned down 45 degrees. The viewing circle has diameter equal to IPD; the points are equally distributed starting at Z positive.
 
 * Upload Images (default off): Check to automatically publish panorama screenshots to VRCHIVE for sharing with others immediately after taking them. Visit alpha.vrchive.com to view them. Panoramas are currently uploaded anonymously (not under a user account).
 
@@ -104,7 +104,7 @@ In stereoscopic mode this option will save all captured camera images (stereo cu
 
 * Max Frames To Record: If nonzero, will automatically stop after capturing this many frames.
 
-* Frame Number Digits: When Capture Every Frame is enabled, this determines the number of digits to use for the frame number in the filenames of the image sequence (default 6, sufficient for 4.6 hours at 60 FPS).
+* Frame Number Digits: When Capture Every Frame is enabled, this determines the number of digits to use for the frame number in the filenames of the image sequence (default 6). If these digits are exceeded, more digits will be used as needed.
 
 * Start Sound: The sound played at the beginning of panorama processing. May be None.
 
@@ -127,8 +127,9 @@ The ReadPanoConfig script allows users to modify panorama capture parameters in 
 
 1. Add the ReadPanoConfig.cs script to the same object as the CapturePanorama.cs script. WARNING: This will override any settings supplied in the Inspector with those in the INI file.
 2. Modify the included asset "CapturePanorama.ini" under the "Config" folder as needed for your application.
-3. After building, copy the asset "CapturePanorama.ini" to the data directory of your build.
-4. To modify settings, modify the .ini file and restart the application.
+3. In the Inspector, set Panorama Width to 4. (saves time at startup)
+4. After building, copy the asset "CapturePanorama.ini" to the data directory of your build.
+5. To modify settings, modify the .ini file and restart the application.
 
 DEVELOPMENT NOTES
 -----------------
@@ -148,7 +149,7 @@ Developed by D Coetzee of eVRydayVR: http://youtube.com/user/eVRydayVR
 
 Funded by the panorama repository VRCHIVE: http://vrchive.com
 
-Default sound effects Clicks_13 and Xylo_13 from:
+Default sound effects Clicks_13, Xylo_13, and DistClickBlocked1 from:
 Free SFX Package - Bleep Blop Audio
 https://www.assetstore.unity3d.com/en/#!/content/5178
 

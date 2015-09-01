@@ -5,34 +5,42 @@
 RWStructuredBuffer<uint> result;
 StructuredBuffer<uint> cameraPixels;
 SamplerState MyLinearClampSampler;
-int equirectangularWidth;
-int equirectangularHeight;
-int ssaaFactor;
-int cameraWidth;
-int cameraHeight;
-int startY;
+uint equirectangularWidth;
+uint equirectangularHeight;
+uint ssaaFactor;
+uint cameraWidth;
+uint cameraHeight;
+uint startY;
+uint sliceHeight;
+uint cameraPixelsSentinelIdx;
+uint sentinelIdx;
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 {
+	if (dtid.x >= equirectangularWidth || dtid.y >= sliceHeight) // In case width/height not multiple of numthreads
+	    return;
+	if (dtid.x == 0u && dtid.y == 0u)
+		result[sentinelIdx] = cameraPixels[cameraPixelsSentinelIdx]; // Sentinel value - set correctly only if set correctly in input buffer
+
     // Must match enum UnityEngine.CubemapFace
-    static const int PositiveX = 0;
-    static const int NegativeX = 1;
-    static const int PositiveY = 2;
-    static const int NegativeY = 3;
-    static const int PositiveZ = 4;
-    static const int NegativeZ = 5;
+    static const uint PositiveX = 0u;
+    static const uint NegativeX = 1u;
+    static const uint PositiveY = 2u;
+    static const uint NegativeY = 3u;
+    static const uint PositiveZ = 4u;
+    static const uint NegativeZ = 5u;
 
 	static const float pi = 3.14159265f;
 	float4 totalColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-	int2 pos = int2(dtid.x, dtid.y + startY);
-	int2 loopStart = pos * ssaaFactor;
-	int2 loopEnd = loopStart + int2(ssaaFactor, ssaaFactor);
+	uint2 pos = uint2(dtid.x, dtid.y + startY);
+	uint2 loopStart = pos * ssaaFactor;
+	uint2 loopEnd = loopStart + uint2(ssaaFactor, ssaaFactor);
 
-	for (int y = loopStart.y; y < loopEnd.y; y++)
+	for (uint y = loopStart.y; y < loopEnd.y; y++)
 	{
-		for (int x = loopStart.x; x < loopEnd.x; x++)
+		for (uint x = loopStart.x; x < loopEnd.x; x++)
 		{
 			float xcoord = (float)x / (equirectangularWidth  * ssaaFactor);
 			float ycoord = (float)y / (equirectangularHeight * ssaaFactor);
@@ -46,11 +54,11 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 
 			float distance;
 			float u, v;
-			int cameraNum;
+			uint cameraNum;
 
 			distance = 1.0f / equirectRayDirectionY;
 			u = equirectRayDirectionX * distance; v = equirectRayDirectionZ * distance;
-			if (u * u <= 1 && v * v <= 1) {
+			if (u * u <= 1.0f && v * v <= 1.0f) {
 				if (equirectRayDirectionY > 0.0f) {
 					cameraNum = PositiveY;
 				} else {
@@ -62,7 +70,7 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 			{
 				distance = 1.0f / equirectRayDirectionX;
 				u = -equirectRayDirectionZ * distance; v = equirectRayDirectionY * distance;
-				if (u * u <= 1 && v * v <= 1) {
+				if (u * u <= 1.0f && v * v <= 1.0f) {
 					if (equirectRayDirectionX > 0.0f) {
 						v = -v;
 						cameraNum = PositiveX;
@@ -74,7 +82,7 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 				{
 					distance = 1.0f / equirectRayDirectionZ;
 					u = equirectRayDirectionX * distance; v = equirectRayDirectionY * distance;
-					if (u * u <= 1 && v * v <= 1) {
+					if (u * u <= 1.0f && v * v <= 1.0f) {
 						if (equirectRayDirectionZ > 0.0f) {
 							v = -v;
 							cameraNum = PositiveZ;
@@ -92,50 +100,56 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 
 			u *= cameraWidth;
 			v *= cameraHeight;
-			int left   = min(cameraWidth  - 1, (int)floor(u)); // Modified to add check
-			int right  = min(cameraWidth  - 1, left + 1);
-			int top    = min(cameraHeight - 1, (int)floor(v)); // Modified to add check
-			int bottom = min(cameraHeight - 1, top  + 1);
+			uint left   = min(cameraWidth  - 1u, (uint)floor(u)); // Modified to add check
+			uint right  = min(cameraWidth  - 1u, left + 1u);
+			uint top    = min(cameraHeight - 1u, (uint)floor(v)); // Modified to add check
+			uint bottom = min(cameraHeight - 1u, top  + 1u);
 			float uFrac = frac(u);
 			float vFrac = frac(v);
 
-			int baseIdx = cameraNum * cameraWidth * cameraHeight;
-			int topRow    = baseIdx + top    * cameraWidth;
-			int bottomRow = baseIdx + bottom * cameraWidth;
+			uint baseIdx = cameraNum * cameraWidth * cameraHeight;
+			uint topRow    = baseIdx + top    * cameraWidth;
+			uint bottomRow = baseIdx + bottom * cameraWidth;
 			uint topLeft     = cameraPixels[topRow    + left ];
 			uint topRight    = cameraPixels[topRow    + right];
 			uint bottomLeft  = cameraPixels[bottomRow + left ];
 			uint bottomRight = cameraPixels[bottomRow + right];
 
-			float r = lerp(lerp( topLeft  >> 16        ,  bottomLeft  >> 16        , vFrac),
-				           lerp( topRight >> 16        ,  bottomRight >> 16        , vFrac), uFrac);
-			float g = lerp(lerp((topLeft  >>  8) & 0xFF, (bottomLeft  >>  8) & 0xFF, vFrac),
-					       lerp((topRight >>  8) & 0xFF, (bottomRight >>  8) & 0xFF, vFrac), uFrac);
-			float b = lerp(lerp( topLeft         & 0xFF,  bottomLeft         & 0xFF, vFrac),
-						   lerp( topRight        & 0xFF,  bottomRight        & 0xFF, vFrac), uFrac);
+			float r = lerp(lerp( topLeft  >> 16u         ,  bottomLeft  >> 16u         , vFrac),
+				           lerp( topRight >> 16u         ,  bottomRight >> 16u         , vFrac), uFrac);
+			float g = lerp(lerp((topLeft  >>  8u) & 0xFFu, (bottomLeft  >>  8u) & 0xFFu, vFrac),
+					       lerp((topRight >>  8u) & 0xFFu, (bottomRight >>  8u) & 0xFFu, vFrac), uFrac);
+			float b = lerp(lerp( topLeft          & 0xFFu,  bottomLeft          & 0xFFu, vFrac),
+						   lerp( topRight         & 0xFFu,  bottomRight         & 0xFFu, vFrac), uFrac);
 
 			totalColor += float4(r, g, b, 255.0f);
 		}
 	}
 
 	totalColor /= ssaaFactor * ssaaFactor;
-	result[(dtid.y * equirectangularWidth) + dtid.x] = ((int)totalColor.r << 16) | ((int)totalColor.g << 8) | (int)totalColor.b;
+	result[(dtid.y * equirectangularWidth) + dtid.x] =
+	    ((uint)totalColor.r << 16u) | ((uint)totalColor.g << 8u) | (uint)totalColor.b;
 }
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void CubeMapToEquirectangularPositiveY (uint3 dtid : SV_DispatchThreadID)
 {
-    static const int cameraNum = 2; /* PositiveY */
+	if (dtid.x >= equirectangularWidth || dtid.y >= sliceHeight) // In case width/height not multiple of numthreads
+	    return;
+	if (dtid.x == 0u && dtid.y == 0u)
+		result[sentinelIdx] = cameraPixels[cameraPixelsSentinelIdx]; // Sentinel value - set correctly only if set correctly in input buffer
+
+    static const uint cameraNum = 2; /* PositiveY */
 	static const float pi = 3.14159265f;
 	float4 totalColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-	int2 pos = int2(dtid.x, dtid.y + startY);
-	int2 loopStart = pos * ssaaFactor;
-	int2 loopEnd = loopStart + int2(ssaaFactor, ssaaFactor);
+	uint2 pos = uint2(dtid.x, dtid.y + startY);
+	uint2 loopStart = pos * ssaaFactor;
+	uint2 loopEnd = loopStart + uint2(ssaaFactor, ssaaFactor);
 
-	for (int y = loopStart.y; y < loopEnd.y; y++)
+	for (uint y = loopStart.y; y < loopEnd.y; y++)
 	{
-		for (int x = loopStart.x; x < loopEnd.x; x++)
+		for (uint x = loopStart.x; x < loopEnd.x; x++)
 		{
 			float xcoord = (float)x / (equirectangularWidth * ssaaFactor);
 			float ycoord = (float)y / (equirectangularHeight * ssaaFactor);
@@ -157,50 +171,56 @@ void CubeMapToEquirectangularPositiveY (uint3 dtid : SV_DispatchThreadID)
 
 			u *= cameraWidth;
 			v *= cameraHeight;
-			int left   = (int)floor(u);
-			int right  = min(cameraWidth  - 1, left + 1);
-			int top    = (int)floor(v);
-			int bottom = min(cameraHeight - 1, top  + 1);
+			uint left   = (uint)floor(u);
+			uint right  = min(cameraWidth  - 1u, left + 1u);
+			uint top    = (uint)floor(v);
+			uint bottom = min(cameraHeight - 1u, top  + 1u);
 			float uFrac = frac(u);
 			float vFrac = frac(v);
 
-			int baseIdx = cameraNum * cameraWidth * cameraHeight;
-			int topRow    = baseIdx + top    * cameraWidth;
-			int bottomRow = baseIdx + bottom * cameraWidth;
+			uint baseIdx = cameraNum * cameraWidth * cameraHeight;
+			uint topRow    = baseIdx + top    * cameraWidth;
+			uint bottomRow = baseIdx + bottom * cameraWidth;
 			uint topLeft     = cameraPixels[topRow    + left ];
 			uint topRight    = cameraPixels[topRow    + right];
 			uint bottomLeft  = cameraPixels[bottomRow + left ];
 			uint bottomRight = cameraPixels[bottomRow + right];
 
-			float r = lerp(lerp( topLeft  >> 16        ,  bottomLeft  >> 16        , vFrac),
-				           lerp( topRight >> 16        ,  bottomRight >> 16        , vFrac), uFrac);
-			float g = lerp(lerp((topLeft  >>  8) & 0xFF, (bottomLeft  >>  8) & 0xFF, vFrac),
-					       lerp((topRight >>  8) & 0xFF, (bottomRight >>  8) & 0xFF, vFrac), uFrac);
-			float b = lerp(lerp( topLeft         & 0xFF,  bottomLeft         & 0xFF, vFrac),
-						   lerp( topRight        & 0xFF,  bottomRight        & 0xFF, vFrac), uFrac);
+			float r = lerp(lerp( topLeft  >> 16u         ,  bottomLeft  >> 16u         , vFrac),
+				           lerp( topRight >> 16u         ,  bottomRight >> 16u         , vFrac), uFrac);
+			float g = lerp(lerp((topLeft  >>  8u) & 0xFFu, (bottomLeft  >>  8u) & 0xFFu, vFrac),
+					       lerp((topRight >>  8u) & 0xFFu, (bottomRight >>  8u) & 0xFFu, vFrac), uFrac);
+			float b = lerp(lerp( topLeft          & 0xFFu,  bottomLeft          & 0xFFu, vFrac),
+						   lerp( topRight         & 0xFFu,  bottomRight         & 0xFFu, vFrac), uFrac);
 
 			totalColor += float4(r, g, b, 255.0f);
 		}
 	}
 
 	totalColor /= ssaaFactor * ssaaFactor;
-	result[(dtid.y * equirectangularWidth) + dtid.x] = ((int)totalColor.r << 16) | ((int)totalColor.g << 8) | (int)totalColor.b;
+	result[(dtid.y * equirectangularWidth) + dtid.x] =
+	    ((uint)totalColor.r << 16u) | ((uint)totalColor.g << 8u) | (uint)totalColor.b;
 }
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void CubeMapToEquirectangularNegativeY (uint3 dtid : SV_DispatchThreadID)
 {
-    static const int cameraNum = 3; /* NegativeY */
+	if (dtid.x >= equirectangularWidth || dtid.y >= sliceHeight) // In case width/height not multiple of numthreads
+	    return;
+	if (dtid.x == 0u && dtid.y == 0u)
+		result[sentinelIdx] = cameraPixels[cameraPixelsSentinelIdx]; // Sentinel value - set correctly only if set correctly in input buffer
+
+    static const uint cameraNum = 3; /* NegativeY */
 	static const float pi = 3.14159265f;
 	float4 totalColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-	int2 pos = int2(dtid.x, dtid.y + startY);
-	int2 loopStart = pos * ssaaFactor;
-	int2 loopEnd = loopStart + int2(ssaaFactor, ssaaFactor);
+	uint2 pos = uint2(dtid.x, dtid.y + startY);
+	uint2 loopStart = pos * ssaaFactor;
+	uint2 loopEnd = loopStart + uint2(ssaaFactor, ssaaFactor);
 
-	for (int y = loopStart.y; y < loopEnd.y; y++)
+	for (uint y = loopStart.y; y < loopEnd.y; y++)
 	{
-		for (int x = loopStart.x; x < loopEnd.x; x++)
+		for (uint x = loopStart.x; x < loopEnd.x; x++)
 		{
 			float xcoord = (float)x / (equirectangularWidth * ssaaFactor);
 			float ycoord = (float)y / (equirectangularHeight * ssaaFactor);
@@ -223,32 +243,33 @@ void CubeMapToEquirectangularNegativeY (uint3 dtid : SV_DispatchThreadID)
 
 			u *= cameraWidth;
 			v *= cameraHeight;
-			int left   = (int)floor(u);
-			int right  = min(cameraWidth  - 1, left + 1);
-			int top    = (int)floor(v);
-			int bottom = min(cameraHeight - 1, top  + 1);
+			uint left   = (uint)floor(u);
+			uint right  = min(cameraWidth  - 1u, left + 1u);
+			uint top    = (uint)floor(v);
+			uint bottom = min(cameraHeight - 1u, top  + 1u);
 			float uFrac = frac(u);
 			float vFrac = frac(v);
 
-			int baseIdx = cameraNum * cameraWidth * cameraHeight;
-			int topRow    = baseIdx + top    * cameraWidth;
-			int bottomRow = baseIdx + bottom * cameraWidth;
+			uint baseIdx = cameraNum * cameraWidth * cameraHeight;
+			uint topRow    = baseIdx + top    * cameraWidth;
+			uint bottomRow = baseIdx + bottom * cameraWidth;
 			uint topLeft     = cameraPixels[topRow    + left ];
 			uint topRight    = cameraPixels[topRow    + right];
 			uint bottomLeft  = cameraPixels[bottomRow + left ];
 			uint bottomRight = cameraPixels[bottomRow + right];
 
-			float r = lerp(lerp( topLeft  >> 16        ,  bottomLeft  >> 16        , vFrac),
-				           lerp( topRight >> 16        ,  bottomRight >> 16        , vFrac), uFrac);
-			float g = lerp(lerp((topLeft  >>  8) & 0xFF, (bottomLeft  >>  8) & 0xFF, vFrac),
-					       lerp((topRight >>  8) & 0xFF, (bottomRight >>  8) & 0xFF, vFrac), uFrac);
-			float b = lerp(lerp( topLeft         & 0xFF,  bottomLeft         & 0xFF, vFrac),
-						   lerp( topRight        & 0xFF,  bottomRight        & 0xFF, vFrac), uFrac);
+			float r = lerp(lerp( topLeft  >> 16u         ,  bottomLeft  >> 16u         , vFrac),
+				           lerp( topRight >> 16u         ,  bottomRight >> 16u         , vFrac), uFrac);
+			float g = lerp(lerp((topLeft  >>  8u) & 0xFFu, (bottomLeft  >>  8u) & 0xFFu, vFrac),
+					       lerp((topRight >>  8u) & 0xFFu, (bottomRight >>  8u) & 0xFFu, vFrac), uFrac);
+			float b = lerp(lerp( topLeft          & 0xFFu,  bottomLeft          & 0xFFu, vFrac),
+						   lerp( topRight         & 0xFFu,  bottomRight         & 0xFFu, vFrac), uFrac);
 
 			totalColor += float4(r, g, b, 255.0f);
 		}
 	}
 
 	totalColor /= ssaaFactor * ssaaFactor;
-	result[(dtid.y * equirectangularWidth) + dtid.x] = ((int)totalColor.r << 16) | ((int)totalColor.g << 8) | (int)totalColor.b;
+	result[(dtid.y * equirectangularWidth) + dtid.x] =
+	    ((uint)totalColor.r << 16u) | ((uint)totalColor.g << 8u) | (uint)totalColor.b;
 }
