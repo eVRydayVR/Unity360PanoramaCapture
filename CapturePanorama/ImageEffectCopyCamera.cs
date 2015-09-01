@@ -41,11 +41,21 @@ namespace Assets.CapturePanorama
 
         void OnRenderImage(RenderTexture src, RenderTexture dest)
         {
-            var parameters = new object[] { src, dest };
-            foreach (var pair in onRenderImageMethods)
+            var sequence = new List<RenderTexture>();
+            sequence.Add(src);
+            RenderTexture temp  = onRenderImageMethods.Count <= 1 ? null : new RenderTexture(dest.width, dest.height, dest.depth, dest.format);
+            RenderTexture temp2 = onRenderImageMethods.Count <= 2 ? null : new RenderTexture(dest.width, dest.height, dest.depth, dest.format);
+            for (int i = 0; i < onRenderImageMethods.Count - 1; i++)
+                sequence.Add(i % 2 == 0 ? temp : temp2);
+            sequence.Add(dest);
+
+            for (int i = 0; i < onRenderImageMethods.Count; i++)
             {
-                pair.Method.Invoke(pair.Instance, parameters);
+                onRenderImageMethods[i].Method.Invoke(onRenderImageMethods[i].Instance, new object[] { sequence[i], sequence[i + 1] });
             }
+
+            if (temp != null) Destroy(temp);
+            if (temp2 != null) Destroy(temp2);
         }
     }
 }
