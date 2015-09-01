@@ -1,0 +1,479 @@
+// This is free and unencumbered software released into the public domain.
+// For more information, please refer to <http://unlicense.org/>
+
+// Uncomment to use in a VR project using the Oculus VR plugin
+// This will avoid issues in which the captured panorama is pitched/rolled
+// when the player pitches/rolls their headset.
+//#define OVR_SUPPORT
+
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using UnityEngine;
+using Bitmap = System.Drawing.Bitmap;
+using DrawingImageFormat = System.Drawing.Imaging.ImageFormat;
+using ImageLockMode = System.Drawing.Imaging.ImageLockMode;
+using PixelFormat = System.Drawing.Imaging.PixelFormat;
+using Process = System.Diagnostics.Process;
+using Rectangle = System.Drawing.Rectangle;
+
+public class CapturePanorama : MonoBehaviour
+{
+    public string panoramaName;
+    public string qualitySetting;
+    public KeyCode screenshotKey = KeyCode.P;
+    public ImageFormat imageFormat = ImageFormat.PNG;
+    public int panoramaWidth = 4096;
+    public string saveImagePath = "";
+    public bool uploadImages = false;
+    public float millisecondsPerFrame = 1000.0f/120.0f;
+    public AudioClip startSound;
+    public AudioClip doneSound;
+    public bool fadeDuringCapture = true;
+    public float fadeTime = 0.25f;
+    public Color fadeColor = new Color(0.0f, 0.0f, 0.0f, 1.0f);
+    public Material fadeMaterial = null;
+    public bool enableDebugging = false;
+
+    public enum ImageFormat { JPEG, PNG, Both };
+    internal string filenameSuffix;
+
+    string apiUrl = "http://alpha.vrchive.com/api/1/";
+    string apiKey = "0b26e4dca20793a83fd92ad83e3e859e";
+
+    GameObject go;
+    Camera cam;
+    Texture2D[] cubemapTexs;
+
+    CubemapFace[] faces;
+    int panoramaHeight, cubemapSize;
+    RenderTexture cubemapRenderTexture = null;
+    byte[] imageFileBytes;
+
+    void Start()
+    {
+        panoramaHeight = panoramaWidth / 2;
+        cubemapSize = panoramaWidth / 4;
+
+        go = new GameObject("CubemapCamera");
+        go.AddComponent<Camera>();
+        go.hideFlags = HideFlags.HideAndDontSave;
+
+        cam = go.GetComponent<Camera>();
+        cam.enabled = false;
+
+        faces = new CubemapFace[] {
+			CubemapFace.PositiveX, CubemapFace.NegativeX,
+			CubemapFace.PositiveY, CubemapFace.NegativeY,
+			CubemapFace.PositiveZ, CubemapFace.NegativeZ };
+
+        cubemapTexs = new Texture2D[6];
+        foreach (CubemapFace face in faces)
+        {
+            cubemapTexs[(int)face] = new Texture2D(cubemapSize, cubemapSize, TextureFormat.RGB24, /*mipmap*/false, /*linear*/true);
+        }
+
+        cubemapRenderTexture = new RenderTexture(cubemapSize, cubemapSize, 24, RenderTextureFormat.ARGB32);
+        cubemapRenderTexture.Create();
+    }
+
+    void Log(string s)
+    {
+        if (enableDebugging)
+            Debug.Log(s, this);
+    }
+
+    void Update()
+    {
+        if (screenshotKey != KeyCode.None && Input.GetKeyDown(screenshotKey) && !Capturing)
+        {
+            Log("Panorama capture key pressed");
+            CaptureScreenshotAsync();
+        }
+    }
+
+    public void CaptureScreenshotAsync()
+    {
+        StartCoroutine(CaptureScreenshotAsyncHelper());
+    }
+
+    internal bool Capturing;
+
+    static List<Process> resizingProcessList = new List<Process>();
+    static List<string> resizingFilenames = new List<string>();
+
+    void SetFadersEnabled(IEnumerable<ScreenFadeControl> fadeControls, bool value)
+    {
+        foreach (ScreenFadeControl fadeControl in fadeControls)
+            fadeControl.enabled = value;
+    }
+
+    public IEnumerator FadeOut(IEnumerable<ScreenFadeControl> fadeControls)
+    {
+        Log("Doing fade out");
+        // Derived from OVRScreenFade
+        float elapsedTime = 0.0f;
+        Color color = fadeColor;
+        color.a = 0.0f;
+        fadeMaterial.color = color;
+        SetFadersEnabled(fadeControls, true);
+        while (elapsedTime < fadeTime)
+        {
+            yield return new WaitForEndOfFrame();
+            elapsedTime += Time.deltaTime;
+            color.a = Mathf.Clamp01(elapsedTime / fadeTime);
+            fadeMaterial.color = color;
+        }
+    }
+
+    public IEnumerator FadeIn(IEnumerable<ScreenFadeControl> fadeControls)
+    {
+        Log("Fading back in");
+        float elapsedTime = 0.0f;
+        Color color = fadeMaterial.color = fadeColor;
+        while (elapsedTime < fadeTime)
+        {
+            yield return new WaitForEndOfFrame();
+            elapsedTime += Time.deltaTime;
+            color.a = 1.0f - Mathf.Clamp01(elapsedTime / fadeTime);
+            fadeMaterial.color = color;
+        }
+        SetFadersEnabled(fadeControls, false);
+    }
+
+
+    public IEnumerator CaptureScreenshotAsyncHelper()
+    {
+        while (Capturing)
+            yield return null; // If CaptureScreenshot() was called programmatically multiple times, serialize the coroutines
+        Capturing = true;
+
+        List<ScreenFadeControl> fadeControls = new List<ScreenFadeControl>();
+        foreach (Camera c in Camera.allCameras)
+        {
+            var fadeControl = c.gameObject.AddComponent<ScreenFadeControl>();
+            fadeControl.fadeMaterial = fadeMaterial;
+            fadeControls.Add(fadeControl);
+        }
+        SetFadersEnabled(fadeControls, false);
+
+        if (fadeDuringCapture)
+            yield return StartCoroutine(FadeOut(fadeControls));
+
+        // Make sure black is shown before we start - sometimes two frames are needed
+        for (int i = 0; i < 2; i++)
+            yield return new WaitForEndOfFrame();
+
+        Log("Starting panorama capture");
+        if (startSound != null)
+        {
+            AudioSource.PlayClipAtPoint(startSound, transform.position);
+        }
+
+        float startTime = Time.realtimeSinceStartup;
+
+        Log("Changing quality level");
+        int saveQualityLevel = QualitySettings.GetQualityLevel();
+        bool qualitySettingWasFound = false;
+        string[] qualitySettingNames = QualitySettings.names;
+        for (int i = 0; i < qualitySettingNames.Length; i++)
+        {
+            string name = qualitySettingNames[i];
+            if (name == qualitySetting)
+            {
+                QualitySettings.SetQualityLevel(i, /*applyExpensiveChanges*/true);
+                qualitySettingWasFound = true;
+            }
+        }
+        if (qualitySetting != "" && !qualitySettingWasFound)
+        {
+            Debug.LogError("Quality setting specified for CapturePanorama is invalid, ignoring.", this);
+        }
+
+#if OVR_SUPPORT
+        Quaternion headOrientation = Quaternion.identity;
+        if (OVRManager.display != null)
+        {
+            headOrientation = OVRManager.display.GetHeadPose(0.0).orientation;
+        }
+#endif
+
+        var cameras = Camera.allCameras;
+        Array.Sort(cameras, (x, y) => x.depth.CompareTo(y.depth));
+        Log("Rendering cubemap");
+        foreach (CubemapFace face in faces)
+        {
+            foreach (Camera c in cameras)
+            {
+                if (c.gameObject.name.Contains("RightEye"))
+                    continue; // Only render left eyes
+
+                go.transform.position = c.transform.position;
+
+                cam.clearFlags = c.clearFlags;
+                cam.backgroundColor = c.backgroundColor;
+                cam.cullingMask = c.cullingMask;
+                cam.nearClipPlane = c.nearClipPlane;
+                cam.farClipPlane = c.farClipPlane;
+                cam.renderingPath = c.renderingPath;
+                cam.hdr = c.hdr;
+                cam.targetTexture = cubemapRenderTexture;
+                cam.fieldOfView = 90.0f;
+
+                var baseRotation = c.transform.rotation;
+#if OVR_SUPPORT
+                baseRotation *= Quaternion.Inverse(headOrientation);
+#endif
+
+                // Don't use RenderToCubemap - it causes problems with compositing multiple cameras, and requires
+                // more temporary VRAM. Just render cube map manually.
+                switch (face)
+                {
+                    case CubemapFace.PositiveX: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 90.0f, 0.0f); break;
+                    case CubemapFace.NegativeX: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, -90.0f, 0.0f); break;
+                    case CubemapFace.PositiveY: cam.transform.localRotation = baseRotation * Quaternion.Euler(90.0f, 0.0f, 0.0f); break;
+                    case CubemapFace.NegativeY: cam.transform.localRotation = baseRotation * Quaternion.Euler(-90.0f, 0.0f, 0.0f); break;
+                    case CubemapFace.PositiveZ: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 0.0f, 0.0f); break;
+                    case CubemapFace.NegativeZ: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 180.0f, 0.0f); break;
+                }
+
+                cam.Render();
+            }
+
+            RenderTexture.active = cubemapRenderTexture;
+            cubemapTexs[(int)face].ReadPixels(new Rect(0, 0, cubemapSize, cubemapSize), 0, 0);
+            cubemapTexs[(int)face].Apply();
+        }
+
+        Log("Resetting quality level");
+        QualitySettings.SetQualityLevel(saveQualityLevel, /*applyExpensiveChanges*/true);
+
+        // Render to Cubemap seems to take up to 2 frames to do its thing -
+        // if this is not here, the fade-in will drop frames.
+        for (int i = 0; i < 2; i++)
+            yield return new WaitForEndOfFrame();
+
+        if (fadeDuringCapture)
+            yield return StartCoroutine(FadeIn(fadeControls));
+
+        foreach (ScreenFadeControl fadeControl in fadeControls)
+        {
+            Destroy(fadeControl);
+        }
+        fadeControls.Clear();
+
+        // Convert to equirectangular projection - use compute shader for better performance if supported by platform
+
+        // Write pixels directly to .NET Bitmap for saving out
+        // Based on https://msdn.microsoft.com/en-us/library/5ey6h79d%28v=vs.110%29.aspx
+        Bitmap bitmap = new Bitmap(panoramaWidth, panoramaHeight, PixelFormat.Format32bppArgb);
+        var bmpData = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.WriteOnly, bitmap.PixelFormat);
+        IntPtr ptr = bmpData.Scan0;
+        byte[] pixelValues = new byte[Math.Abs(bmpData.Stride) * bitmap.Height];
+
+        yield return StartCoroutine(CubemapToEquirectangularCpu(cubemapTexs, cubemapSize, pixelValues, bmpData.Stride, panoramaWidth, panoramaHeight));
+
+        yield return null;
+        System.Runtime.InteropServices.Marshal.Copy(pixelValues, 0, ptr, pixelValues.Length);
+        bitmap.UnlockBits(bmpData);
+        yield return null;
+
+        Log("Time to take panorama screenshot: " + (Time.realtimeSinceStartup - startTime) + " sec");
+
+        // Save in separate thread to avoid hiccups
+        string filenamePrefix = String.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss-fff}", panoramaName, DateTime.Now);
+        string imagePath = saveImagePath;
+        if (imagePath == null || imagePath == "")
+        {
+            imagePath = Application.dataPath + "/..";
+        }
+        
+        string filePath = "";
+        foreach (var format in new ImageFormat[] { ImageFormat.PNG, ImageFormat.JPEG }) // Last one in list will be used for upload
+        {
+            if (imageFormat != format && imageFormat != ImageFormat.Both)
+                continue;
+
+            string suffix = filenameSuffix + ((format == ImageFormat.JPEG) ? ".jpg" : ".png");
+            filePath = imagePath + "/" + filenamePrefix + suffix;
+            var thread = new Thread(() =>
+            {
+                Log("Saving equirectangular image");
+                if (format == ImageFormat.JPEG)
+                {
+                    // Try to set JPEG quality to max - doesn't do anything on my system but worth a shot.
+                    // TODO: Use better image processing library to get decent JPEG quality out.
+                    // Based on http://stackoverflow.com/questions/1484759/quality-of-a-saved-jpg-in-c-sharp
+                    var encoder = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
+                    var encParams = new System.Drawing.Imaging.EncoderParameters() { Param = new[] { new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 100L) } };
+                    bitmap.Save(filePath, encoder, encParams);
+                }
+                else
+                {
+                    bitmap.Save(filePath, DrawingImageFormat.Png);
+                }
+            });
+            thread.Start();
+            while (thread.ThreadState == ThreadState.Running)
+                yield return null;
+        }
+
+        if (uploadImages)
+        {
+            Log("Uploading image");
+            imageFileBytes = File.ReadAllBytes(filePath);
+            yield return StartCoroutine(UploadImage(imageFileBytes, filenamePrefix + ".jpg", "image/jpeg"));
+        }
+        else
+        {
+            if (doneSound != null)
+            {
+                AudioSource.PlayClipAtPoint(doneSound, transform.position);
+            }
+            Capturing = false;
+        }
+    }
+
+    internal void ClearProcessQueue()
+    {
+        while (resizingProcessList.Count > 0)
+        {
+            resizingProcessList[0].WaitForExit();
+            File.Delete(resizingFilenames[0]);
+            resizingProcessList.RemoveAt(0);
+            resizingFilenames.RemoveAt(0);
+        }
+    }
+
+    // Based on http://docs.unity3d.com/ScriptReference/WWWForm.html and
+    // http://answers.unity3d.com/questions/48686/uploading-photo-and-video-on-a-web-server.html
+    IEnumerator UploadImage(byte[] imageFileBytes, string filename, string mimeType)
+    {
+        float startTime = Time.realtimeSinceStartup;
+
+        WWWForm form = new WWWForm();
+
+        form.AddField("key", apiKey);
+        form.AddField("action", "upload");
+        form.AddBinaryData("source", imageFileBytes, filename, "image/jpeg");
+
+        WWW w = new WWW(apiUrl + "upload", form);
+        yield return w;
+        if (!string.IsNullOrEmpty(w.error))
+        {
+            Debug.LogError(w.error, this);
+        }
+        else
+        {
+            Log("Time to upload panorama screenshot: " + (Time.realtimeSinceStartup - startTime) + " sec");
+            if (doneSound != null)
+            {
+                AudioSource.PlayClipAtPoint(doneSound, transform.position);
+            }
+            Capturing = false;
+        }
+    }
+
+    IEnumerator CubemapToEquirectangularCpu(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues,
+        int stride, int equirectangularWidth, int equirectangularHeight)
+    {
+        Log("Converting to equirectangular");
+
+        yield return null; // Wait for next frame at beginning - already used up some time capturing snapshot
+
+        float startTime = Time.realtimeSinceStartup;
+        float processingTimePerFrame = millisecondsPerFrame / 1000.0f;
+        float maxValue = 1.0f - 1.0f / cubemapSize;
+        int height = equirectangularHeight;
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < equirectangularWidth; x++)
+            {
+                float xcoord = (float)x / equirectangularWidth;
+                float ycoord = (float)y / equirectangularHeight;
+                float latitude = (ycoord - 0.5f) * Mathf.PI;
+                float longitude = (xcoord * 2.0f - 1.0f) * Mathf.PI;
+
+                // Equivalent to: Vector3 equirectRayDirection =
+                //     Quaternion.Euler(-latitude * 360/(2*Mathf.PI), longitude * 360/(2*Mathf.PI), 0.0f) * new Vector3(0, 0, 1);
+                float cosLat = Mathf.Cos(latitude);
+                Vector3 equirectRayDirection = new Vector3(
+                    cosLat * Mathf.Sin(longitude), -Mathf.Sin(latitude), cosLat * Mathf.Cos(longitude));
+
+                float distance = 0.0f;
+                CubemapFace face;
+                float u, v;
+
+                {
+                    distance = 1.0f / equirectRayDirection.y;
+                    u = equirectRayDirection.x * distance; v = equirectRayDirection.z * distance;
+                    if (equirectRayDirection.y > 0.0f)
+                    {
+                        face = CubemapFace.PositiveY;
+                    }
+                    else
+                    {
+                        face = CubemapFace.NegativeY;
+                        u = -u;
+                    }
+                }
+
+                if (Mathf.Abs(u) > 1.0f || Mathf.Abs(v) > 1.0f)
+                {
+                    distance = 1.0f / equirectRayDirection.x;
+                    u = -equirectRayDirection.z * distance; v = equirectRayDirection.y * distance;
+                    if (equirectRayDirection.x > 0.0f)
+                    {
+                        face = CubemapFace.PositiveX;
+                        v = -v;
+                    }
+                    else
+                    {
+                        face = CubemapFace.NegativeX;
+                    }
+                }
+                if (Mathf.Abs(u) > 1.0f || Mathf.Abs(v) > 1.0f)
+                {
+                    distance = 1.0f / equirectRayDirection.z;
+                    u = equirectRayDirection.x * distance; v = equirectRayDirection.y * distance;
+                    if (equirectRayDirection.z > 0.0f)
+                    {
+                        face = CubemapFace.PositiveZ;
+                        v = -v;
+                    }
+                    else
+                    {
+                        face = CubemapFace.NegativeZ;
+                    }
+                }
+
+                u = (u + 1.0f) / 2.0f;
+                v = (v + 1.0f) / 2.0f;
+
+                // Boundary: should blend between cubemap views, but for now just grab color
+                // of nearest pixel in selected cubemap view
+                u = Mathf.Min(u, maxValue);
+                v = Mathf.Min(v, maxValue);
+
+                // equirectangular.SetPixel(x, y, );
+                Color32 c = cubemapTexs[(int)face].GetPixelBilinear(u, v);
+                int baseIdx = stride * (height - 1 - y) + x * 4;
+                pixelValues[baseIdx + 0] = c.b;
+                pixelValues[baseIdx + 1] = c.g;
+                pixelValues[baseIdx + 2] = c.r;
+                pixelValues[baseIdx + 3] = c.a;
+
+                if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
+                {
+                    yield return null; // Wait until next frame
+                    startTime = Time.realtimeSinceStartup;
+                }
+            }
+        }
+
+        yield return null;
+    }
+}
