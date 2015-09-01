@@ -1,0 +1,21 @@
+﻿#pragma kernel Copy
+
+// This shader exists to work around a bug in Unity:
+// http://issuetracker.unity3d.com/issues/texture2d-dot-readpixels-fails-if-rendertexture-has-anti-aliasing-set
+// It works by first rendering to the RenderTexture with antialiasing normally, then
+// copying from the render texture to a new render texture with this shader (new shader has
+// antiAliasing set to 1), then using ReadPixels() on that texture.
+
+RWTexture2D<float4> dest;
+RWStructuredBuffer<uint> forceWaitResultBuffer;
+Texture2D<float4> source;
+int width, height;
+SamplerState MyPointRepeatSampler;
+
+[numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
+void Copy (uint3 id : SV_DispatchThreadID)
+{
+    dest[id.xy] = source.SampleLevel(MyPointRepeatSampler, float2(((float)id.x + 0.5)/ width, ((float)id.y + 0.5)/ height), 0);
+	if (id.x == 0 && id.y == 0)
+	    forceWaitResultBuffer[0] = 5; // Used on CPU side to force a wait for this copy operation to complete
+}

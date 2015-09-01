@@ -10,7 +10,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using UnityEngine;
 using Bitmap = System.Drawing.Bitmap;
@@ -26,16 +25,20 @@ using UnityEngine.VR;
 public class CapturePanorama : MonoBehaviour
 {
     public string panoramaName;
-    public string qualitySetting;
-    public KeyCode screenshotKey = KeyCode.P;
+    public KeyCode captureKey = KeyCode.P;
     public ImageFormat imageFormat = ImageFormat.PNG;
     public int panoramaWidth = 8192;
+    public AntiAliasing antiAliasing = AntiAliasing._8;
+    public int ssaaFactor = 1;
     public string saveImagePath = "";
     public bool saveCubemap = false;
     public bool uploadImages = false;
     public bool useDefaultOrientation = false;
-    public float millisecondsPerFrame = 1000.0f/120.0f;
-    public bool useGpuTransform = false;
+    public bool useGpuTransform = true;
+    public float cpuMillisecondsPerFrame = 1000.0f / 120.0f;
+    public bool captureEveryFrame = false;
+    public int frameRate = 30;
+    public int frameNumberDigits = 6;
     public AudioClip startSound;
     public AudioClip doneSound;
     public bool fadeDuringCapture = true;
@@ -43,10 +46,11 @@ public class CapturePanorama : MonoBehaviour
     public Color fadeColor = new Color(0.0f, 0.0f, 0.0f, 1.0f);
     public Material fadeMaterial = null;
     public ComputeShader convertPanoramaShader;
+    public ComputeShader copyShader;
     public bool enableDebugging = false;
 
-    public enum ImageFormat { JPEG, PNG };
-    internal string filenameSuffix;
+    public enum ImageFormat { PNG, JPEG, BMP };
+    public enum AntiAliasing { _1 = 1, _2 = 2, _4 = 4, _8 = 8 };
 
     string apiUrl = "http://alpha.vrchive.com/api/1/";
     string apiKey = "0b26e4dca20793a83fd92ad83e3e859e";
@@ -54,15 +58,58 @@ public class CapturePanorama : MonoBehaviour
     GameObject go = null;
     Camera cam;
     Texture2D[] cubemapTexs = null;
+    RenderTexture[] cubemapRenderTexturesCopy = null;
 
+    bool capturingEveryFrame = false;
     bool usingGpuTransform;
     CubemapFace[] faces;
-    int lastConfiguredPanoramaWidth, panoramaHeight, cubemapSize;
+    CubemapFace[] faces2;
+    int panoramaHeight, cubemapSize;
     RenderTexture cubemapRenderTexture = null;
-    RenderTexture equirectangularRenderTexture = null;
-    Texture2D equirectangularTexture;
-    int kernelIdx = -1;
+    int convertPanoramaKernelIdx = -1, convertPanoramaYPositiveKernelIdx = -1, convertPanoramaYNegativeKernelIdx = -1, copyKernelIdx = -1;
+    int[] convertPanoramaKernelIdxs;
     byte[] imageFileBytes;
+    string videoBaseName = "";
+    private int frameNumber;
+    ComputeBuffer convertPanoramaResultBuffer, forceWaitResultBuffer;
+    const int ResultBufferSlices = 8; // Makes result buffer same pixel count as a cubemap texture
+
+    int lastConfiguredPanoramaWidth, lastConfiguredSsaaFactor;
+    bool lastConfiguredSaveCubemap, lastConfiguredUseGpuTransform;
+    AntiAliasing lastConfiguredAntiAliasing = AntiAliasing._1;
+
+    DrawingImageFormat FormatToDrawingFormat(ImageFormat format)
+    {
+        switch (format)
+        {
+            case ImageFormat.PNG:  return DrawingImageFormat.Png;
+            case ImageFormat.JPEG: return DrawingImageFormat.Jpeg;
+            case ImageFormat.BMP:  return DrawingImageFormat.Bmp;
+            default: Debug.Assert(false); return DrawingImageFormat.Png;
+        }
+    }
+
+    string FormatMimeType(ImageFormat format)
+    {
+        switch (format)
+        {
+            case ImageFormat.PNG:  return "image/png";
+            case ImageFormat.JPEG: return "image/jpeg";
+            case ImageFormat.BMP:  return "image/bmp";
+            default: Debug.Assert(false); return "";
+        }
+    }
+
+    string FormatToExtension(ImageFormat format)
+    {
+        switch (format)
+        {
+            case ImageFormat.PNG:  return "png";
+            case ImageFormat.JPEG: return "jpg";
+            case ImageFormat.BMP:  return "bmp";
+            default: Debug.Assert(false); return "";
+        }
+    }
 
     void Start()
     {
@@ -70,9 +117,16 @@ public class CapturePanorama : MonoBehaviour
     }
 
     void Reinitialize() {
+        Log("Settings changed, calling Reinitialize()");
+
         lastConfiguredPanoramaWidth = panoramaWidth;
+        lastConfiguredSsaaFactor = ssaaFactor;
+        lastConfiguredAntiAliasing = antiAliasing;
+        lastConfiguredSaveCubemap = saveCubemap;
+        lastConfiguredUseGpuTransform = useGpuTransform;
+
         panoramaHeight = panoramaWidth / 2;
-        cubemapSize = panoramaWidth / 4;
+        cubemapSize = panoramaWidth * ssaaFactor / 4;
 
         if (go != null)
             Destroy(go);
@@ -84,48 +138,75 @@ public class CapturePanorama : MonoBehaviour
         cam = go.GetComponent<Camera>();
         cam.enabled = false;
 
+        usingGpuTransform = useGpuTransform && convertPanoramaShader != null && SystemInfo.supportsComputeShaders;
+
         faces = new CubemapFace[] {
 			CubemapFace.PositiveX, CubemapFace.NegativeX,
 			CubemapFace.PositiveY, CubemapFace.NegativeY,
 			CubemapFace.PositiveZ, CubemapFace.NegativeZ };
 
-        if (cubemapTexs != null) {
-            foreach (Texture2D tex in cubemapTexs) {
+        faces2 = new CubemapFace[] {
+			CubemapFace.PositiveX, CubemapFace.NegativeX,
+			CubemapFace.PositiveY, CubemapFace.NegativeY,
+			CubemapFace.NegativeZ, CubemapFace.PositiveZ };
+
+        if (cubemapRenderTexturesCopy != null)
+            foreach (RenderTexture tex in cubemapRenderTexturesCopy)
                 Destroy(tex);
-            }
+
+        cubemapRenderTexturesCopy = new RenderTexture[6];
+        foreach (CubemapFace face in faces2)
+        {
+            cubemapRenderTexturesCopy[(int)face] = new RenderTexture(cubemapSize, cubemapSize, /*depth*/0, RenderTextureFormat.ARGB32);
+            cubemapRenderTexturesCopy[(int)face].enableRandomWrite = true;
+            cubemapRenderTexturesCopy[(int)face].antiAliasing = 1; // Must be 1 to avoid Unity ReadPixels() bug
+            cubemapRenderTexturesCopy[(int)face].Create();
         }
 
-        cubemapTexs = new Texture2D[6];
-        foreach (CubemapFace face in faces)
+        if (cubemapTexs != null)
+            foreach (Texture2D tex in cubemapTexs)
+                Destroy(tex);
+
+        cubemapTexs = null;
+        if (saveCubemap || !usingGpuTransform)
         {
-            cubemapTexs[(int)face] = new Texture2D(cubemapSize, cubemapSize, TextureFormat.RGB24, /*mipmap*/false, /*linear*/true);
+            cubemapTexs = new Texture2D[6];
+            foreach (CubemapFace face in faces2)
+            {
+                cubemapTexs[(int)face] = new Texture2D(cubemapSize, cubemapSize, TextureFormat.RGB24, /*mipmap*/false, /*linear*/true);
+                cubemapTexs[(int)face].Apply(/*updateMipmaps*/false, /*makeNoLongerReadable*/false);
+            }
         }
 
         if (cubemapRenderTexture != null)
             Destroy(cubemapRenderTexture);
-            
-        cubemapRenderTexture = new RenderTexture(cubemapSize, cubemapSize, 24, RenderTextureFormat.ARGB32);
+
+        cubemapRenderTexture = new RenderTexture(cubemapSize, cubemapSize, /*depth*/24, RenderTextureFormat.ARGB32);
+        cubemapRenderTexture.antiAliasing = (int)antiAliasing;
         cubemapRenderTexture.Create();
-
-        if (equirectangularRenderTexture != null)
-            Destroy(equirectangularRenderTexture);
-
-        if (equirectangularTexture != null)
-            Destroy(equirectangularTexture);
-
-        usingGpuTransform = useGpuTransform && convertPanoramaShader != null && SystemInfo.supportsComputeShaders;
 
         if (usingGpuTransform)
         {
-            equirectangularRenderTexture =
-                new RenderTexture(panoramaWidth, panoramaHeight, 0, RenderTextureFormat.ARGB32);
-            equirectangularRenderTexture.enableRandomWrite = true;
-            equirectangularRenderTexture.Create();
+            convertPanoramaKernelIdx = convertPanoramaShader.FindKernel("CubeMapToEquirectangular");
+            convertPanoramaYPositiveKernelIdx = convertPanoramaShader.FindKernel("CubeMapToEquirectangularPositiveY");
+            convertPanoramaYNegativeKernelIdx = convertPanoramaShader.FindKernel("CubeMapToEquirectangularNegativeY");
+            convertPanoramaKernelIdxs = new int[] { convertPanoramaKernelIdx, convertPanoramaYPositiveKernelIdx, convertPanoramaYNegativeKernelIdx };
 
-            equirectangularTexture = new Texture2D(panoramaWidth, panoramaHeight, TextureFormat.RGB24, /*mipmap*/false, /*linear*/true);
-
-            kernelIdx = convertPanoramaShader.FindKernel("CubeMapToEquirectangular");
+            foreach (CubemapFace face in faces)
+            {
+                foreach (int kernelIdx in convertPanoramaKernelIdxs)
+                    convertPanoramaShader.SetTexture(kernelIdx, "cubemapFace" + face.ToString(), cubemapRenderTexturesCopy[(int)face]);
+            }
+            convertPanoramaShader.SetInt("equirectangularWidth", panoramaWidth);
+            convertPanoramaShader.SetInt("equirectangularHeight", panoramaHeight);
+            convertPanoramaShader.SetInt("ssaaFactor", ssaaFactor);
+            convertPanoramaShader.SetInt("cubemapSize", cubemapSize);
         }
+
+        copyKernelIdx = copyShader.FindKernel("Copy");
+        copyShader.SetTexture(copyKernelIdx, "source", cubemapRenderTexture);
+        copyShader.SetInt("width", cubemapSize);
+        copyShader.SetInt("height", cubemapSize);
     }
 
     void Log(string s)
@@ -138,20 +219,66 @@ public class CapturePanorama : MonoBehaviour
     {
         if (panoramaWidth <= 3) // Can occur temporarily while modifying Panorama Width property in editor
             return;
-        if (panoramaWidth != lastConfiguredPanoramaWidth) {
+        if (panoramaWidth != lastConfiguredPanoramaWidth ||
+            ssaaFactor != lastConfiguredSsaaFactor ||
+            antiAliasing != lastConfiguredAntiAliasing ||
+            saveCubemap != lastConfiguredSaveCubemap ||
+            useGpuTransform != lastConfiguredUseGpuTransform)
+        {
             Reinitialize();
         }
-        if (screenshotKey != KeyCode.None && Input.GetKeyDown(screenshotKey) && !Capturing)
+
+        if (capturingEveryFrame)
         {
-            string filenameBase = String.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss-fff}", panoramaName, DateTime.Now);
-            Log("Panorama capture key pressed, capturing " + filenameBase);
-            CaptureScreenshotAsync(filenameBase);
+            if (captureKey != KeyCode.None && Input.GetKeyDown(captureKey))
+            {
+                StopCaptureEveryFrame();
+            }
+            else
+            {
+                CaptureScreenshotSync(videoBaseName + "_" + frameNumber.ToString(new String('0', frameNumberDigits)));
+                frameNumber += 1;
+            }
         }
+        else if (captureKey != KeyCode.None && Input.GetKeyDown(captureKey) && !Capturing)
+        {
+            if (captureEveryFrame)
+            {
+                StartCaptureEveryFrame();
+            }
+            else
+            {
+                string filenameBase = String.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss-fff}", panoramaName, DateTime.Now);
+                Log("Panorama capture key pressed, capturing " + filenameBase);
+                CaptureScreenshotAsync(filenameBase);
+            }
+        }
+    }
+
+    public void StartCaptureEveryFrame()
+    {
+        Time.captureFramerate = frameRate;
+        videoBaseName = String.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss-fff}", panoramaName, DateTime.Now);
+        frameNumber = 0;
+
+        capturingEveryFrame = true;
+    }
+
+    public void StopCaptureEveryFrame()
+    {
+        Time.captureFramerate = 0;
+        capturingEveryFrame = false;
+    }
+
+    public void CaptureScreenshotSync(string filenameBase)
+    {
+        var enumerator = CaptureScreenshotAsyncHelper(filenameBase, /*async*/false);
+        while (enumerator.MoveNext()) { }
     }
 
     public void CaptureScreenshotAsync(string filenameBase)
     {
-        StartCoroutine(CaptureScreenshotAsyncHelper(filenameBase));
+        StartCoroutine(CaptureScreenshotAsyncHelper(filenameBase, /*async*/true));
     }
 
     internal bool Capturing;
@@ -199,10 +326,11 @@ public class CapturePanorama : MonoBehaviour
     }
 
 
-    public IEnumerator CaptureScreenshotAsyncHelper(string filenameBase)
+    public IEnumerator CaptureScreenshotAsyncHelper(string filenameBase, bool async)
     {
-        while (Capturing)
-            yield return null; // If CaptureScreenshot() was called programmatically multiple times, serialize the coroutines
+        if (async)
+            while (Capturing)
+                yield return null; // If CaptureScreenshot() was called programmatically multiple times, serialize the coroutines
         Capturing = true;
 
         List<ScreenFadeControl> fadeControls = new List<ScreenFadeControl>();
@@ -214,38 +342,31 @@ public class CapturePanorama : MonoBehaviour
         }
         SetFadersEnabled(fadeControls, false);
 
-        if (fadeDuringCapture)
+        if (fadeDuringCapture && async)
             yield return StartCoroutine(FadeOut(fadeControls));
 
         // Make sure black is shown before we start - sometimes two frames are needed
         for (int i = 0; i < 2; i++)
             yield return new WaitForEndOfFrame();
 
+        // Initialize compute buffers - do here instead of in Reinitialize() to work around error on Destroy()
+        if (usingGpuTransform)
+        {
+            convertPanoramaResultBuffer =
+                new ComputeBuffer(/*count*/panoramaWidth * (panoramaHeight + ResultBufferSlices - 1) / ResultBufferSlices, /*stride*/4);
+            foreach (int kernelIdx in convertPanoramaKernelIdxs)
+                convertPanoramaShader.SetBuffer(kernelIdx, "result", convertPanoramaResultBuffer);
+        }
+        forceWaitResultBuffer = new ComputeBuffer(/*count*/1, /*stride*/4);
+        copyShader.SetBuffer(copyKernelIdx, "forceWaitResultBuffer", forceWaitResultBuffer);
+
         Log("Starting panorama capture");
-        if (startSound != null)
+        if (!captureEveryFrame && startSound != null)
         {
             AudioSource.PlayClipAtPoint(startSound, transform.position);
         }
 
         float startTime = Time.realtimeSinceStartup;
-
-        Log("Changing quality level");
-        int saveQualityLevel = QualitySettings.GetQualityLevel();
-        bool qualitySettingWasFound = false;
-        string[] qualitySettingNames = QualitySettings.names;
-        for (int i = 0; i < qualitySettingNames.Length; i++)
-        {
-            string name = qualitySettingNames[i];
-            if (name == qualitySetting)
-            {
-                QualitySettings.SetQualityLevel(i, /*applyExpensiveChanges*/true);
-                qualitySettingWasFound = true;
-            }
-        }
-        if (qualitySetting != "" && !qualitySettingWasFound)
-        {
-            Debug.LogError("Quality setting specified for CapturePanorama is invalid, ignoring.", this);
-        }
 
         Quaternion headOrientation = Quaternion.identity;
 #if OVR_SUPPORT
@@ -264,7 +385,15 @@ public class CapturePanorama : MonoBehaviour
         var cameras = Camera.allCameras;
         Array.Sort(cameras, (x, y) => x.depth.CompareTo(y.depth));
         Log("Rendering cubemap");
-        foreach (CubemapFace face in faces)
+        cam.fieldOfView = 90.0f;
+
+        // Need to extract each cubemap into a Texture2D so we can read the pixels, but Unity bug
+        // prevents this with antiAliasing: http://issuetracker.unity3d.com/issues/texture2d-dot-readpixels-fails-if-rendertexture-has-anti-aliasing-set
+        // We copy the cubemap textures using a shader as a workaround.
+
+        cam.targetTexture = cubemapRenderTexture;
+
+        foreach (CubemapFace face in faces2)
         {
             foreach (Camera c in cameras)
             {
@@ -280,9 +409,7 @@ public class CapturePanorama : MonoBehaviour
                 cam.farClipPlane = c.farClipPlane;
                 cam.renderingPath = c.renderingPath;
                 cam.hdr = c.hdr;
-                cam.targetTexture = cubemapRenderTexture;
-                cam.fieldOfView = 90.0f;
-
+                
                 var baseRotation = c.transform.rotation;
                 baseRotation *= Quaternion.Inverse(headOrientation);
                 if (useDefaultOrientation)
@@ -294,26 +421,39 @@ public class CapturePanorama : MonoBehaviour
                 // more temporary VRAM. Just render cube map manually.
                 switch (face)
                 {
-                    case CubemapFace.PositiveX: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 90.0f, 0.0f); break;
-                    case CubemapFace.NegativeX: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, -90.0f, 0.0f); break;
-                    case CubemapFace.PositiveY: cam.transform.localRotation = baseRotation * Quaternion.Euler(90.0f, 0.0f, 0.0f); break;
-                    case CubemapFace.NegativeY: cam.transform.localRotation = baseRotation * Quaternion.Euler(-90.0f, 0.0f, 0.0f); break;
-                    case CubemapFace.PositiveZ: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 0.0f, 0.0f); break;
-                    case CubemapFace.NegativeZ: cam.transform.localRotation = baseRotation * Quaternion.Euler(0.0f, 180.0f, 0.0f); break;
+                    case CubemapFace.PositiveX: cam.transform.localRotation = baseRotation * Quaternion.Euler(  0.0f,  90.0f, 0.0f); break;
+                    case CubemapFace.NegativeX: cam.transform.localRotation = baseRotation * Quaternion.Euler(  0.0f, -90.0f, 0.0f); break;
+                    case CubemapFace.PositiveY: cam.transform.localRotation = baseRotation * Quaternion.Euler( 90.0f,   0.0f, 0.0f); break;
+                    case CubemapFace.NegativeY: cam.transform.localRotation = baseRotation * Quaternion.Euler(-90.0f,   0.0f, 0.0f); break;
+                    case CubemapFace.PositiveZ: cam.transform.localRotation = baseRotation * Quaternion.Euler(  0.0f,   0.0f, 0.0f); break;
+                    case CubemapFace.NegativeZ: cam.transform.localRotation = baseRotation * Quaternion.Euler(  0.0f, 180.0f, 0.0f); break;
                 }
 
                 cam.Render();
             }
 
-            RenderTexture.active = cubemapRenderTexture;
-            cubemapTexs[(int)face].ReadPixels(new Rect(0, 0, cubemapSize, cubemapSize), 0, 0);
-            cubemapTexs[(int)face].Apply();
+            copyShader.SetTexture(copyKernelIdx, "dest", cubemapRenderTexturesCopy[(int)face]);
+            int threadsX = 32, threadsY = 32; // Must match shader
+            copyShader.Dispatch(copyKernelIdx, (cubemapSize + threadsX - 1) / threadsX, (cubemapSize + threadsY - 1) / threadsY, 1);
+            // Get force wait result to force a wait for the shader to complete
+            int[] forceWaitResult = new int[1];
+            forceWaitResultBuffer.GetData(forceWaitResult);
         }
 
-        Log("Resetting quality level");
-        QualitySettings.SetQualityLevel(saveQualityLevel, /*applyExpensiveChanges*/true);
+        // If we need to access the cubemap pixels on the CPU, retrieve them now
+        if (saveCubemap || !usingGpuTransform)
+        {
+            foreach (CubemapFace face in faces)
+            {
+                RenderTexture.active = cubemapRenderTexturesCopy[(int)face];
+                cubemapTexs[(int)face].ReadPixels(new Rect(0, 0, cubemapSize, cubemapSize), 0, 0);
+                cubemapTexs[(int)face].Apply(/*updateMipmaps*/false, /*makeNoLongerReadable*/false);
+            }
 
-        string suffix = filenameSuffix + ((imageFormat == ImageFormat.JPEG) ? ".jpg" : ".png");
+            RenderTexture.active = null;
+        }
+
+        string suffix = "." + FormatToExtension(imageFormat);
         string filePath = "";
         // Save in separate thread to avoid hiccups
         string imagePath = saveImagePath;
@@ -351,12 +491,8 @@ public class CapturePanorama : MonoBehaviour
 
                 Log("Saving cubemap image " + face.ToString());
                 string cubeFilepath = imagePath + "/" + filenameBase + "_" + face.ToString() + suffix;
-                if (imageFormat == ImageFormat.JPEG)
-                    // TODO: Use better image processing library to get decent JPEG quality out.
-                    bitmap.Save(cubeFilepath, DrawingImageFormat.Jpeg);
-                else
-                    bitmap.Save(cubeFilepath, DrawingImageFormat.Png);
-
+                // TODO: Use better image processing library to get decent JPEG quality out.
+                bitmap.Save(cubeFilepath, FormatToDrawingFormat(imageFormat));
                 bitmap.Dispose();
             }
         }
@@ -365,7 +501,7 @@ public class CapturePanorama : MonoBehaviour
         for (int i = 0; i < 2; i++)
             yield return new WaitForEndOfFrame();
 
-        if (!usingGpuTransform && fadeDuringCapture)
+        if (async && !usingGpuTransform && fadeDuringCapture)
             yield return StartCoroutine(FadeIn(fadeControls));
 
         // Convert to equirectangular projection - use compute shader for better performance if supported by platform
@@ -379,7 +515,13 @@ public class CapturePanorama : MonoBehaviour
             IntPtr ptr = bmpData.Scan0;
             byte[] pixelValues = new byte[Math.Abs(bmpData.Stride) * bitmap.Height];
 
-            yield return StartCoroutine(CubemapToEquirectangular(cubemapTexs, cubemapSize, pixelValues, bmpData.Stride, panoramaWidth, panoramaHeight));
+            if (async)
+                yield return StartCoroutine(CubemapToEquirectangular(cubemapTexs, cubemapSize, pixelValues, bmpData.Stride, panoramaWidth, panoramaHeight, ssaaFactor, async));
+            else
+            {
+                var enumerator = CubemapToEquirectangular(cubemapTexs, cubemapSize, pixelValues, bmpData.Stride, panoramaWidth, panoramaHeight, ssaaFactor, async);
+                while (enumerator.MoveNext()) { }
+            }
 
             yield return null;
             System.Runtime.InteropServices.Marshal.Copy(pixelValues, 0, ptr, pixelValues.Length);
@@ -388,23 +530,30 @@ public class CapturePanorama : MonoBehaviour
 
             Log("Time to take panorama screenshot: " + (Time.realtimeSinceStartup - startTime) + " sec");
 
+            if (convertPanoramaResultBuffer != null)
+                convertPanoramaResultBuffer.Release();
+            convertPanoramaResultBuffer = null;
+            if (forceWaitResultBuffer != null)
+                forceWaitResultBuffer.Release();
+            forceWaitResultBuffer = null;
+
             var thread = new Thread(() =>
             {
                 Log("Saving equirectangular image");
-                if (imageFormat == ImageFormat.JPEG)
-                    // TODO: Use better image processing library to get decent JPEG quality out.
-                    bitmap.Save(filePath, DrawingImageFormat.Jpeg);
-                else
-                    bitmap.Save(filePath, DrawingImageFormat.Png);
+                // TODO: Use better image processing library to get decent JPEG quality out.
+                bitmap.Save(filePath, FormatToDrawingFormat(imageFormat));
             });
             thread.Start();
             while (thread.ThreadState == ThreadState.Running)
-                yield return null;
+                if (async)
+                    yield return null;
+                else
+                    Thread.Sleep(0);
 
             bitmap.Dispose();
         }
 
-        if (usingGpuTransform && fadeDuringCapture)
+        if (async && usingGpuTransform && fadeDuringCapture)
             yield return StartCoroutine(FadeIn(fadeControls));
 
         foreach (ScreenFadeControl fadeControl in fadeControls)
@@ -413,15 +562,22 @@ public class CapturePanorama : MonoBehaviour
         }
         fadeControls.Clear();
 
-        if (uploadImages)
+        if (uploadImages && !captureEveryFrame)
         {
             Log("Uploading image");
             imageFileBytes = File.ReadAllBytes(filePath);
-            yield return StartCoroutine(UploadImage(imageFileBytes, filenameBase + suffix, (imageFormat == ImageFormat.JPEG) ? "image/jpeg" : "image/png"));
+            string mimeType = FormatMimeType(imageFormat);
+            if (async)
+                yield return StartCoroutine(UploadImage(imageFileBytes, filenameBase + suffix, mimeType, async));
+            else
+            {
+                var enumerator = UploadImage(imageFileBytes, filenameBase + suffix, mimeType, async);
+                while (enumerator.MoveNext()) { }
+            }
         }
         else
         {
-            if (doneSound != null)
+            if (!captureEveryFrame && doneSound != null)
             {
                 AudioSource.PlayClipAtPoint(doneSound, transform.position);
             }
@@ -442,7 +598,7 @@ public class CapturePanorama : MonoBehaviour
 
     // Based on http://docs.unity3d.com/ScriptReference/WWWForm.html and
     // http://answers.unity3d.com/questions/48686/uploading-photo-and-video-on-a-web-server.html
-    IEnumerator UploadImage(byte[] imageFileBytes, string filename, string mimeType)
+    IEnumerator UploadImage(byte[] imageFileBytes, string filename, string mimeType, bool async)
     {
         float startTime = Time.realtimeSinceStartup;
 
@@ -450,7 +606,7 @@ public class CapturePanorama : MonoBehaviour
 
         form.AddField("key", apiKey);
         form.AddField("action", "upload");
-        form.AddBinaryData("source", imageFileBytes, filename, "image/jpeg");
+        form.AddBinaryData("source", imageFileBytes, filename, mimeType);
 
         WWW w = new WWW(apiUrl + "upload", form);
         yield return w;
@@ -461,7 +617,7 @@ public class CapturePanorama : MonoBehaviour
         else
         {
             Log("Time to upload panorama screenshot: " + (Time.realtimeSinceStartup - startTime) + " sec");
-            if (doneSound != null)
+            if (!captureEveryFrame && doneSound != null)
             {
                 AudioSource.PlayClipAtPoint(doneSound, transform.position);
             }
@@ -470,71 +626,500 @@ public class CapturePanorama : MonoBehaviour
     }
 
     IEnumerator CubemapToEquirectangular(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues,
-        int stride, int equirectangularWidth, int equirectangularHeight)
+        int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, bool async)
     {
         if (usingGpuTransform)
         {
-            convertPanoramaShader.SetTexture(kernelIdx, "equirectangular", equirectangularRenderTexture);
-            foreach (CubemapFace face in faces)
+            int sliceHeight = (panoramaHeight + ResultBufferSlices - 1) / ResultBufferSlices;
+
+            Log("Invoking GPU shader for equirectangular reprojection");
+            int threadsX = 32, threadsY = 32; // Must match shader
+            int[] resultPixels = new int[panoramaWidth * sliceHeight];
+            int endYNegative   = (int)Mathf.Floor(panoramaHeight * 0.25f);
+            int startYPositive = (int)Mathf.Ceil(panoramaHeight * 0.75f);
+            for (int sliceNum = 0; sliceNum < ResultBufferSlices; sliceNum++)
             {
-                convertPanoramaShader.SetTexture(kernelIdx, "cubemapFace" + face.ToString(), cubemapTexs[(int)face]);
-            }
-            convertPanoramaShader.SetInt("equirectangularWidth", equirectangularWidth);
-            convertPanoramaShader.SetInt("equirectangularHeight", equirectangularHeight);
-            convertPanoramaShader.SetInt("cubemapSize", cubemapSize);
+                int startSlice = sliceNum * sliceHeight;
+                int endSlice = Math.Min(startSlice + sliceHeight, panoramaHeight);
+                convertPanoramaShader.SetInt("startY", sliceNum * sliceHeight);
+                if (endSlice <= endYNegative)
+                    convertPanoramaShader.Dispatch(convertPanoramaYNegativeKernelIdx, (panoramaWidth + threadsX - 1) / threadsX, (panoramaHeight + threadsY - 1) / threadsY, 1);
+                else if (startSlice >= startYPositive)
+                    convertPanoramaShader.Dispatch(convertPanoramaYPositiveKernelIdx, (panoramaWidth + threadsX - 1) / threadsX, (panoramaHeight + threadsY - 1) / threadsY, 1);
+                else
+                    convertPanoramaShader.Dispatch(convertPanoramaKernelIdx, (panoramaWidth + threadsX - 1) / threadsX, (panoramaHeight + threadsY - 1) / threadsY, 1);
 
-            convertPanoramaShader.SetInt("startX", 0);
-            convertPanoramaShader.SetInt("startY", 0);
-
-            // TODO: fix params here when renderTextureHeight/Width < panoWidth/HeightWithSsaa
-            convertPanoramaShader.Dispatch(kernelIdx, equirectangularWidth, equirectangularHeight, 1);
-
-            RenderTexture.active = equirectangularRenderTexture;
-            equirectangularTexture.ReadPixels(new Rect(0, 0, equirectangularWidth, equirectangularHeight), 0, 0);
-            equirectangularTexture.Apply();
-
-            // Copy to pixelValues output array
-            Color32[] texturePixels = equirectangularTexture.GetPixels32();
-            int inputIdx = 0;
-            for (int y = 0; y < equirectangularHeight; y++)
-            {
-                int outputIdx = stride * y;
-                for (int x = 0; x < equirectangularWidth; x++)
+                // Copy to pixelValues output array
+                convertPanoramaResultBuffer.GetData(resultPixels);
+                int inputIdx = 0;
+                for (int y = startSlice; y < endSlice; y++)
                 {
-                    Color32 c = texturePixels[inputIdx];
-                    pixelValues[outputIdx + 0] = c.b;
-                    pixelValues[outputIdx + 1] = c.g;
-                    pixelValues[outputIdx + 2] = c.r;
-                    pixelValues[outputIdx + 3] = c.a;
-                    outputIdx += 4;
-                    inputIdx++;
+                    int outputIdx = stride * y;
+                    for (int x = 0; x < panoramaWidth; x++)
+                    {
+                        int packedCol = resultPixels[inputIdx];
+                        pixelValues[outputIdx + 0] = (byte)((packedCol >> 0) & 0xFF);
+                        pixelValues[outputIdx + 1] = (byte)((packedCol >> 8) & 0xFF);
+                        pixelValues[outputIdx + 2] = (byte)((packedCol >> 16) & 0xFF);
+                        pixelValues[outputIdx + 3] = 255;
+                        outputIdx += 4;
+                        inputIdx++;
+                    }
                 }
             }
         }
         else
         {
-            yield return StartCoroutine(CubemapToEquirectangularCpu(cubemapTexs, cubemapSize, pixelValues,
-                stride, equirectangularWidth, equirectangularHeight));
+            if (async)
+                yield return StartCoroutine(CubemapToEquirectangularCpu(cubemapTexs, cubemapSize, pixelValues,
+                    stride, panoramaWidth, panoramaHeight, ssaaFactor, async));
+            else
+            {
+                var enumerator = CubemapToEquirectangularCpu(cubemapTexs, cubemapSize, pixelValues,
+                    stride, panoramaWidth, panoramaHeight, ssaaFactor, async);
+                while (enumerator.MoveNext()) { }
+            }
         }
     }
 
     IEnumerator CubemapToEquirectangularCpu(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues,
-        int stride, int equirectangularWidth, int equirectangularHeight)
+        int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, bool async)
     {
         Log("Converting to equirectangular");
 
         yield return null; // Wait for next frame at beginning - already used up some time capturing snapshot
 
         float startTime = Time.realtimeSinceStartup;
-        float processingTimePerFrame = millisecondsPerFrame / 1000.0f;
+        float processingTimePerFrame = cpuMillisecondsPerFrame / 1000.0f;
         float maxValue = 1.0f - 1.0f / cubemapSize;
-        int height = equirectangularHeight;
-        for (int y = 0; y < height; y++)
+        int numPixelsAveraged = ssaaFactor * ssaaFactor;
+
+        // For efficiency we're going to do a series of rectangles each drawn from only one texture,
+        // only using the slow general-case reprojection where necessary.
+
+        int endYPositive   = (int)Mathf.Floor(panoramaHeight * 0.25f);
+        int startYNegative = (int)Mathf.Ceil(panoramaHeight * 0.75f);
+
+        // 0.195913f is angle in radians between (1, 0, 1) and (1, 1, 1) over pi
+        int endTopMixedRegion      = (int)Mathf.Ceil (panoramaHeight * (0.5f - 0.195913f));
+        int startBottomMixedRegion = (int)Mathf.Floor(panoramaHeight * (0.5f + 0.195913f));
+
+        int startXNegative = (int)Mathf.Ceil (panoramaWidth * 1.0f / 8.0f);
+        int endXNegative   = (int)Mathf.Floor(panoramaWidth * 3.0f / 8.0f);
+
+        int startZPositive = (int)Mathf.Ceil (panoramaWidth * 3.0f / 8.0f);
+        int endZPositive   = (int)Mathf.Floor(panoramaWidth * 5.0f / 8.0f);
+
+        int startXPositive = (int)Mathf.Ceil(panoramaWidth  * 5.0f / 8.0f);
+        int endXPositive   = (int)Mathf.Floor(panoramaWidth * 7.0f / 8.0f);
+
+        int startZNegative = (int)Mathf.Ceil(panoramaWidth  * 7.0f / 8.0f);
+        int endZNegative   = (int)Mathf.Floor(panoramaWidth * 1.0f / 8.0f); // z negative wraps/loops around
+
+        if (async)
         {
-            for (int x = 0; x < equirectangularWidth; x++)
+            yield return StartCoroutine(CubemapToEquirectangularCpuPositiveY(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, 0, panoramaWidth, endYPositive));
+            yield return StartCoroutine(CubemapToEquirectangularCpuNegativeY(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, startYNegative, panoramaWidth, panoramaHeight));
+
+            yield return StartCoroutine(CubemapToEquirectangularCpuPositiveX(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                startXPositive, endTopMixedRegion, endXPositive, startBottomMixedRegion));
+            yield return StartCoroutine(CubemapToEquirectangularCpuNegativeX(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                startXNegative, endTopMixedRegion, endXNegative, startBottomMixedRegion));
+            yield return StartCoroutine(CubemapToEquirectangularCpuPositiveZ(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                startZPositive, endTopMixedRegion, endZPositive, startBottomMixedRegion));
+
+            // Do in two pieces since z negative wraps/loops around
+            yield return StartCoroutine(CubemapToEquirectangularCpuNegativeZ(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                startZNegative, endTopMixedRegion, panoramaWidth, startBottomMixedRegion));
+            yield return StartCoroutine(CubemapToEquirectangularCpuNegativeZ(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, endTopMixedRegion, endZNegative, startBottomMixedRegion));
+
+            // Handle all remaining image areas with the general case
+            yield return StartCoroutine(CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, endYPositive, panoramaWidth, endTopMixedRegion));
+            yield return StartCoroutine(CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, startBottomMixedRegion, panoramaWidth, startYNegative));
+
+            // If width is not multiple of 8, due to rounding, there may be one-column strips where the X/Z textures mix together
+            if (endZNegative < startXNegative)
+                yield return StartCoroutine(CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                    endZNegative, endTopMixedRegion, startXNegative, startBottomMixedRegion));
+            if (endXNegative < startZPositive)
+                yield return StartCoroutine(CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                    endXNegative, endTopMixedRegion, startZPositive, startBottomMixedRegion));
+            if (endZPositive < startXPositive)
+                yield return StartCoroutine(CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                    endZPositive, endTopMixedRegion, startXPositive, startBottomMixedRegion));
+            if (endXPositive < startZNegative)
+                yield return StartCoroutine(CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                    endXPositive, endTopMixedRegion, startZNegative, startBottomMixedRegion));
+        }
+        else
+        {
+            IEnumerator enumerator;
+            enumerator = CubemapToEquirectangularCpuPositiveY(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, 0, panoramaWidth, endYPositive);
+            while (enumerator.MoveNext()) { }
+            enumerator = CubemapToEquirectangularCpuNegativeY(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, startYNegative, panoramaWidth, panoramaHeight);
+            while (enumerator.MoveNext()) { }
+
+            enumerator = CubemapToEquirectangularCpuPositiveX(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                startXPositive, endTopMixedRegion, endXPositive, startBottomMixedRegion);
+            while (enumerator.MoveNext()) { }
+            enumerator = CubemapToEquirectangularCpuNegativeX(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                startXNegative, endTopMixedRegion, endXNegative, startBottomMixedRegion);
+            while (enumerator.MoveNext()) { }
+            enumerator = CubemapToEquirectangularCpuPositiveZ(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                startZPositive, endTopMixedRegion, endZPositive, startBottomMixedRegion);
+            while (enumerator.MoveNext()) { }
+            
+            // Do in two pieces since z negative wraps/loops around
+            enumerator = CubemapToEquirectangularCpuNegativeZ(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                startZNegative, endTopMixedRegion, panoramaWidth, startBottomMixedRegion);
+            while (enumerator.MoveNext()) { }
+            enumerator = CubemapToEquirectangularCpuNegativeZ(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, endTopMixedRegion, endZNegative, startBottomMixedRegion);
+            while (enumerator.MoveNext()) { }
+
+            // Handle all remaining image areas with the general case
+            enumerator = CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, endYPositive, panoramaWidth, endTopMixedRegion);
+            while (enumerator.MoveNext()) { } 
+            enumerator = CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                0, startBottomMixedRegion, panoramaWidth, startYNegative);
+            while (enumerator.MoveNext()) { }
+
+            // If width is not multiple of 8, due to rounding, there may be one-column strips where the X/Z textures mix together
+            if (endZNegative < startXNegative)
             {
-                float xcoord = (float)x / equirectangularWidth;
-                float ycoord = (float)y / equirectangularHeight;
+                enumerator = CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                    endZNegative, endTopMixedRegion, startXNegative, startBottomMixedRegion);
+                while (enumerator.MoveNext()) { }
+            }
+            if (endXNegative < startZPositive)
+            {
+                enumerator = CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                    endXNegative, endTopMixedRegion, startZPositive, startBottomMixedRegion);
+                while (enumerator.MoveNext()) { }
+            }
+            if (endZPositive < startXPositive)
+            {
+                enumerator = CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                    endZPositive, endTopMixedRegion, startXPositive, startBottomMixedRegion);
+                while (enumerator.MoveNext()) { }
+            }
+            if (endXPositive < startZNegative)
+            {
+                enumerator = CubemapToEquirectangularCpuGeneralCase(cubemapTexs, cubemapSize, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, maxValue, numPixelsAveraged,
+                    endXPositive, endTopMixedRegion, startZNegative, startBottomMixedRegion);
+                while (enumerator.MoveNext()) { }
+            }
+        }
+
+        yield return null;
+    }
+
+    private IEnumerator CubemapToEquirectangularCpuPositiveY(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues, int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, float startTime, float processingTimePerFrame, float maxValue, int numPixelsAveraged,
+        int startX, int startY, int endX, int endY)
+    {
+        var cubemapTex = cubemapTexs[(int)CubemapFace.PositiveY];
+        for (int y = startY; y < endY; y++)
+        for (int x = startX; x < endX; x++)
+        {
+            int rTotal = 0, gTotal = 0, bTotal = 0, aTotal = 0;
+            for (int ySsaa = y * ssaaFactor; ySsaa < (y + 1) * ssaaFactor; ySsaa++)
+            for (int xSsaa = x * ssaaFactor; xSsaa < (x + 1) * ssaaFactor; xSsaa++)
+            {
+                float xcoord = (float)xSsaa / (panoramaWidth * ssaaFactor);
+                float ycoord = (float)ySsaa / (panoramaHeight * ssaaFactor);
+
+                float latitude = (ycoord - 0.5f) * Mathf.PI;
+                float longitude = (xcoord * 2.0f - 1.0f) * Mathf.PI;
+
+                float cosLat = Mathf.Cos(latitude);
+                Vector3 equirectRayDirection = new Vector3(
+                    cosLat * Mathf.Sin(longitude), -Mathf.Sin(latitude), cosLat * Mathf.Cos(longitude));
+
+                float distance = 1.0f / equirectRayDirection.y;
+                float u = equirectRayDirection.x * distance, v = equirectRayDirection.z * distance;
+                // Debug.Assert (equirectRayDirection.y > 0.0f);
+                // Debug.Assert (! (Mathf.Abs(u) > 1.0f || Mathf.Abs(v) > 1.0f) );
+
+                u = (u + 1.0f) / 2.0f;
+                v = (v + 1.0f) / 2.0f;
+
+                Color32 c = cubemapTex.GetPixelBilinear(u, v);
+                rTotal += c.r; gTotal += c.g; bTotal += c.b; aTotal += c.a;
+            }
+
+            int baseIdx = stride * (panoramaHeight - 1 - y) + x * 4;
+            pixelValues[baseIdx + 0] = (byte)(bTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 1] = (byte)(gTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 2] = (byte)(rTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 3] = (byte)(aTotal / numPixelsAveraged);
+
+            if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
+            {
+                yield return null; // Wait until next frame
+                startTime = Time.realtimeSinceStartup;
+            }
+        }
+    }
+
+    private IEnumerator CubemapToEquirectangularCpuNegativeY(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues, int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, float startTime, float processingTimePerFrame, float maxValue, int numPixelsAveraged,
+        int startX, int startY, int endX, int endY)
+    {
+        var cubemapTex = cubemapTexs[(int)CubemapFace.NegativeY];
+        for (int y = startY; y < endY; y++)
+        for (int x = startX; x < endX; x++)
+        {
+            int rTotal = 0, gTotal = 0, bTotal = 0, aTotal = 0;
+            for (int ySsaa = y * ssaaFactor; ySsaa < (y + 1) * ssaaFactor; ySsaa++)
+            for (int xSsaa = x * ssaaFactor; xSsaa < (x + 1) * ssaaFactor; xSsaa++)
+            {
+                float xcoord = (float)xSsaa / (panoramaWidth * ssaaFactor);
+                float ycoord = (float)ySsaa / (panoramaHeight * ssaaFactor);
+
+                float latitude = (ycoord - 0.5f) * Mathf.PI;
+                float longitude = (xcoord * 2.0f - 1.0f) * Mathf.PI;
+
+                float cosLat = Mathf.Cos(latitude);
+                Vector3 equirectRayDirection = new Vector3(
+                    cosLat * Mathf.Sin(longitude), -Mathf.Sin(latitude), cosLat * Mathf.Cos(longitude));
+
+                float distance = 1.0f / equirectRayDirection.y;
+                float u = equirectRayDirection.x * distance, v = equirectRayDirection.z * distance;
+                u = -u;
+                // Debug.Assert (equirectRayDirection.y < 0.0f);
+                // Debug.Assert (! (Mathf.Abs(u) > 1.0f || Mathf.Abs(v) > 1.0f) );
+
+                u = (u + 1.0f) / 2.0f;
+                v = (v + 1.0f) / 2.0f;
+
+                Color32 c = cubemapTex.GetPixelBilinear(u, v);
+                rTotal += c.r; gTotal += c.g; bTotal += c.b; aTotal += c.a;
+            }
+
+            int baseIdx = stride * (panoramaHeight - 1 - y) + x * 4;
+            pixelValues[baseIdx + 0] = (byte)(bTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 1] = (byte)(gTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 2] = (byte)(rTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 3] = (byte)(aTotal / numPixelsAveraged);
+
+            if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
+            {
+                yield return null; // Wait until next frame
+                startTime = Time.realtimeSinceStartup;
+            }
+        }
+    }
+
+    private IEnumerator CubemapToEquirectangularCpuPositiveX(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues, int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, float startTime, float processingTimePerFrame, float maxValue, int numPixelsAveraged,
+        int startX, int startY, int endX, int endY)
+    {
+        var cubemapTex = cubemapTexs[(int)CubemapFace.PositiveX];
+        for (int y = startY; y < endY; y++)
+        for (int x = startX; x < endX; x++)
+        {
+            int rTotal = 0, gTotal = 0, bTotal = 0, aTotal = 0;
+            for (int ySsaa = y * ssaaFactor; ySsaa < (y + 1) * ssaaFactor; ySsaa++)
+            for (int xSsaa = x * ssaaFactor; xSsaa < (x + 1) * ssaaFactor; xSsaa++)
+            {
+                float xcoord = (float)xSsaa / (panoramaWidth * ssaaFactor);
+                float ycoord = (float)ySsaa / (panoramaHeight * ssaaFactor);
+
+                float latitude = (ycoord - 0.5f) * Mathf.PI;
+                float longitude = (xcoord * 2.0f - 1.0f) * Mathf.PI;
+
+                float cosLat = Mathf.Cos(latitude);
+                Vector3 equirectRayDirection = new Vector3(
+                    cosLat * Mathf.Sin(longitude), -Mathf.Sin(latitude), cosLat * Mathf.Cos(longitude));
+
+                float distance = 1.0f / equirectRayDirection.x;
+                float u = -equirectRayDirection.z * distance, v = equirectRayDirection.y * distance;
+                v = -v;
+                // Debug.Assert(equirectRayDirection.x > 0.0f);
+                // Debug.Assert (! (Mathf.Abs(u) > 1.0f || Mathf.Abs(v) > 1.0f) );
+
+                u = (u + 1.0f) / 2.0f;
+                v = (v + 1.0f) / 2.0f;
+
+                Color32 c = cubemapTex.GetPixelBilinear(u, v);
+                rTotal += c.r; gTotal += c.g; bTotal += c.b; aTotal += c.a;
+            }
+
+            int baseIdx = stride * (panoramaHeight - 1 - y) + x * 4;
+            pixelValues[baseIdx + 0] = (byte)(bTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 1] = (byte)(gTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 2] = (byte)(rTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 3] = (byte)(aTotal / numPixelsAveraged);
+
+            if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
+            {
+                yield return null; // Wait until next frame
+                startTime = Time.realtimeSinceStartup;
+            }
+        }
+    }
+
+    private IEnumerator CubemapToEquirectangularCpuNegativeX(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues, int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, float startTime, float processingTimePerFrame, float maxValue, int numPixelsAveraged,
+        int startX, int startY, int endX, int endY)
+    {
+        var cubemapTex = cubemapTexs[(int)CubemapFace.NegativeX];
+        for (int y = startY; y < endY; y++)
+        for (int x = startX; x < endX; x++)
+        {
+            int rTotal = 0, gTotal = 0, bTotal = 0, aTotal = 0;
+            for (int ySsaa = y * ssaaFactor; ySsaa < (y + 1) * ssaaFactor; ySsaa++)
+            for (int xSsaa = x * ssaaFactor; xSsaa < (x + 1) * ssaaFactor; xSsaa++)
+            {
+                float xcoord = (float)xSsaa / (panoramaWidth * ssaaFactor);
+                float ycoord = (float)ySsaa / (panoramaHeight * ssaaFactor);
+
+                float latitude = (ycoord - 0.5f) * Mathf.PI;
+                float longitude = (xcoord * 2.0f - 1.0f) * Mathf.PI;
+
+                float cosLat = Mathf.Cos(latitude);
+                Vector3 equirectRayDirection = new Vector3(
+                    cosLat * Mathf.Sin(longitude), -Mathf.Sin(latitude), cosLat * Mathf.Cos(longitude));
+
+                float distance = 1.0f / equirectRayDirection.x;
+                float u = -equirectRayDirection.z * distance, v = equirectRayDirection.y * distance;
+                // Debug.Assert(equirectRayDirection.x < 0.0f);
+                // Debug.Assert (! (Mathf.Abs(u) > 1.0f || Mathf.Abs(v) > 1.0f) );
+
+                u = (u + 1.0f) / 2.0f;
+                v = (v + 1.0f) / 2.0f;
+
+                Color32 c = cubemapTex.GetPixelBilinear(u, v);
+                rTotal += c.r; gTotal += c.g; bTotal += c.b; aTotal += c.a;
+            }
+
+            int baseIdx = stride * (panoramaHeight - 1 - y) + x * 4;
+            pixelValues[baseIdx + 0] = (byte)(bTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 1] = (byte)(gTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 2] = (byte)(rTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 3] = (byte)(aTotal / numPixelsAveraged);
+
+            if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
+            {
+                yield return null; // Wait until next frame
+                startTime = Time.realtimeSinceStartup;
+            }
+        }
+    }
+
+    private IEnumerator CubemapToEquirectangularCpuPositiveZ(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues, int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, float startTime, float processingTimePerFrame, float maxValue, int numPixelsAveraged,
+        int startX, int startY, int endX, int endY)
+    {
+        var cubemapTex = cubemapTexs[(int)CubemapFace.PositiveZ];
+        for (int y = startY; y < endY; y++)
+        for (int x = startX; x < endX; x++)
+        {
+            int rTotal = 0, gTotal = 0, bTotal = 0, aTotal = 0;
+            for (int ySsaa = y * ssaaFactor; ySsaa < (y + 1) * ssaaFactor; ySsaa++)
+            for (int xSsaa = x * ssaaFactor; xSsaa < (x + 1) * ssaaFactor; xSsaa++)
+            {
+                float xcoord = (float)xSsaa / (panoramaWidth * ssaaFactor);
+                float ycoord = (float)ySsaa / (panoramaHeight * ssaaFactor);
+
+                float latitude = (ycoord - 0.5f) * Mathf.PI;
+                float longitude = (xcoord * 2.0f - 1.0f) * Mathf.PI;
+
+                float cosLat = Mathf.Cos(latitude);
+                Vector3 equirectRayDirection = new Vector3(
+                    cosLat * Mathf.Sin(longitude), -Mathf.Sin(latitude), cosLat * Mathf.Cos(longitude));
+
+                float distance = 1.0f / equirectRayDirection.z;
+                float u = equirectRayDirection.x * distance, v = equirectRayDirection.y * distance;
+                v = -v;
+                // Debug.Assert (equirectRayDirection.z > 0.0f);
+                // Debug.Assert (! (Mathf.Abs(u) > 1.0f || Mathf.Abs(v) > 1.0f) );
+
+                u = (u + 1.0f) / 2.0f;
+                v = (v + 1.0f) / 2.0f;
+
+                Color32 c = cubemapTex.GetPixelBilinear(u, v);
+                rTotal += c.r; gTotal += c.g; bTotal += c.b; aTotal += c.a;
+            }
+
+            int baseIdx = stride * (panoramaHeight - 1 - y) + x * 4;
+            pixelValues[baseIdx + 0] = (byte)(bTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 1] = (byte)(gTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 2] = (byte)(rTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 3] = (byte)(aTotal / numPixelsAveraged);
+
+            if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
+            {
+                yield return null; // Wait until next frame
+                startTime = Time.realtimeSinceStartup;
+            }
+        }
+    }
+
+    private IEnumerator CubemapToEquirectangularCpuNegativeZ(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues, int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, float startTime, float processingTimePerFrame, float maxValue, int numPixelsAveraged,
+        int startX, int startY, int endX, int endY)
+    {
+        var cubemapTex = cubemapTexs[(int)CubemapFace.NegativeZ];
+        for (int y = startY; y < endY; y++)
+        for (int x = startX; x < endX; x++)
+        {
+            int rTotal = 0, gTotal = 0, bTotal = 0, aTotal = 0;
+            for (int ySsaa = y * ssaaFactor; ySsaa < (y + 1) * ssaaFactor; ySsaa++)
+            for (int xSsaa = x * ssaaFactor; xSsaa < (x + 1) * ssaaFactor; xSsaa++)
+            {
+                float xcoord = (float)xSsaa / (panoramaWidth * ssaaFactor);
+                float ycoord = (float)ySsaa / (panoramaHeight * ssaaFactor);
+
+                float latitude = (ycoord - 0.5f) * Mathf.PI;
+                float longitude = (xcoord * 2.0f - 1.0f) * Mathf.PI;
+
+                float cosLat = Mathf.Cos(latitude);
+                Vector3 equirectRayDirection = new Vector3(
+                    cosLat * Mathf.Sin(longitude), -Mathf.Sin(latitude), cosLat * Mathf.Cos(longitude));
+
+                float distance = 1.0f / equirectRayDirection.z;
+                float u = equirectRayDirection.x * distance, v = equirectRayDirection.y * distance;
+                // Debug.Assert (equirectRayDirection.z < 0.0f);
+                // Debug.Assert (! (Mathf.Abs(u) > 1.0f || Mathf.Abs(v) > 1.0f) );
+
+                u = (u + 1.0f) / 2.0f;
+                v = (v + 1.0f) / 2.0f;
+
+                Color32 c = cubemapTex.GetPixelBilinear(u, v);
+                rTotal += c.r; gTotal += c.g; bTotal += c.b; aTotal += c.a;
+            }
+
+            int baseIdx = stride * (panoramaHeight - 1 - y) + x * 4;
+            pixelValues[baseIdx + 0] = (byte)(bTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 1] = (byte)(gTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 2] = (byte)(rTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 3] = (byte)(aTotal / numPixelsAveraged);
+
+            if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
+            {
+                yield return null; // Wait until next frame
+                startTime = Time.realtimeSinceStartup;
+            }
+        }
+    }
+
+    private IEnumerator CubemapToEquirectangularCpuGeneralCase(Texture2D[] cubemapTexs, int cubemapSize, byte[] pixelValues, int stride, int panoramaWidth, int panoramaHeight, int ssaaFactor, float startTime, float processingTimePerFrame, float maxValue, int numPixelsAveraged,
+        int startX, int startY, int endX, int endY)
+    {
+        for (int y = startY; y < endY; y++)
+        for (int x = startX; x < endX; x++)
+        {
+            int rTotal = 0, gTotal = 0, bTotal = 0, aTotal = 0;
+            for (int ySsaa = y * ssaaFactor; ySsaa < (y + 1) * ssaaFactor; ySsaa++)
+            for (int xSsaa = x * ssaaFactor; xSsaa < (x + 1) * ssaaFactor; xSsaa++)
+            {
+                float xcoord = (float)xSsaa / (panoramaWidth * ssaaFactor);
+                float ycoord = (float)ySsaa / (panoramaHeight * ssaaFactor);
+
                 float latitude = (ycoord - 0.5f) * Mathf.PI;
                 float longitude = (xcoord * 2.0f - 1.0f) * Mathf.PI;
 
@@ -599,22 +1184,21 @@ public class CapturePanorama : MonoBehaviour
                 u = Mathf.Min(u, maxValue);
                 v = Mathf.Min(v, maxValue);
 
-                // equirectangular.SetPixel(x, y, );
                 Color32 c = cubemapTexs[(int)face].GetPixelBilinear(u, v);
-                int baseIdx = stride * (height - 1 - y) + x * 4;
-                pixelValues[baseIdx + 0] = c.b;
-                pixelValues[baseIdx + 1] = c.g;
-                pixelValues[baseIdx + 2] = c.r;
-                pixelValues[baseIdx + 3] = c.a;
+                rTotal += c.r; gTotal += c.g; bTotal += c.b; aTotal += c.a;
+            }
 
-                if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
-                {
-                    yield return null; // Wait until next frame
-                    startTime = Time.realtimeSinceStartup;
-                }
+            int baseIdx = stride * (panoramaHeight - 1 - y) + x * 4;
+            pixelValues[baseIdx + 0] = (byte)(bTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 1] = (byte)(gTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 2] = (byte)(rTotal / numPixelsAveraged);
+            pixelValues[baseIdx + 3] = (byte)(aTotal / numPixelsAveraged);
+
+            if ((x & 0xFF) == 0 && Time.realtimeSinceStartup - startTime > processingTimePerFrame)
+            {
+                yield return null; // Wait until next frame
+                startTime = Time.realtimeSinceStartup;
             }
         }
-
-        yield return null;
     }
 }
