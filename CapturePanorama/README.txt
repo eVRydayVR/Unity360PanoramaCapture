@@ -68,6 +68,8 @@ Properties on the Capture Panorama script:
 
 * Panorama Name: Used as the prefix of the saved image filename. If "Upload Images" is enabled, this will appear in the title of the image on the web.
 
+* Quality Setting: Selects which of the quality settings (under Project Settings->Quality) to use during capture. Highest is recommended. Default is to use the player's current setting.
+
 * Capture Key (default "P"): the key to press to capture a 360 screenshot. If you wish to handle your own input, set this to "None" and invoke the CaptureScreenshotAsync() method from your script. If "Capture Every Frame" is enabled, this start and stop capturing of the image sequence.
 
 * Image Format (default PNG): Determines what format(s) to save/upload the image file in. JPEG produces smaller filesize but is much lower quality. BMP is faster to save than PNG but larger.

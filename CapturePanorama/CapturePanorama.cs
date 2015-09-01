@@ -28,6 +28,7 @@ namespace CapturePanorama
     public class CapturePanorama : MonoBehaviour
     {
         public string panoramaName;
+        public string qualitySetting;
         public KeyCode captureKey = KeyCode.P;
         public ImageFormat imageFormat = ImageFormat.PNG;
         public bool captureStereoscopic = false;
@@ -89,6 +90,7 @@ namespace CapturePanorama
         float tanHalfHFov, tanHalfVFov, hFovAdjust, vFovAdjust;
         int overlapTextures;
         bool initializeFailed = true;
+        AudioSource audioSource;
 
         const uint BufferSentinelValue = 1419455993; // Must match value in TextureToBufferShader.compute
 
@@ -131,8 +133,22 @@ namespace CapturePanorama
             }
         }
 
-        void Start()
+        static CapturePanorama instance;
+
+        public void Awake()
         {
+            if (instance == null)
+                instance = this;
+            else
+                Debug.LogError("More than one CapturePanorama instance detected.");
+        }
+
+        public void Start()
+        {
+            audioSource = this.gameObject.AddComponent<AudioSource>();
+            audioSource.spatialBlend = 0.0f; // Use 2D sound for sound effects
+            audioSource.Play();
+
             Reinitialize();
         }
 
@@ -151,7 +167,7 @@ namespace CapturePanorama
             // return 1.0000454019910097f * Mathf.Exp(-10.0f * latitudeNormalized * latitudeNormalized) - 0.00004540199100968779f;
         }
 
-        void OnDestroy()
+        public void OnDestroy()
         {
             Cleanup();
         }
@@ -204,8 +220,9 @@ namespace CapturePanorama
 
             if (!SystemInfo.supportsComputeShaders)
             {
-                throw new Exception("CapturePanorama requires compute shaders. Your system does not support them. " +
+                Debug.LogWarning("CapturePanorama requires compute shaders. Your system does not support them. " +
                     "On PC, compute shaders require DirectX 11, Windows Vista or later, and a GPU capable of Shader Model 5.0.");
+                return;
             }
 
             lastConfiguredCaptureStereoscopic = captureStereoscopic;
@@ -347,7 +364,7 @@ namespace CapturePanorama
                 Debug.Log(s, this);
         }
 
-        void Update()
+        public void Update()
         {
             bool captureKeyPressed = Input.GetKeyDown(captureKey);
 
@@ -356,13 +373,13 @@ namespace CapturePanorama
                 if (captureKeyPressed)
                 {
                     if (panoramaWidth < 4)
-                        Debug.LogError("Panorama Width must be at least 4.");
+                        Debug.LogError("Panorama Width must be at least 4. No panorama captured.");
                     if (captureStereoscopic && numCirclePoints < 8)
-                        Debug.LogError("Num Circle Points must be at least 8.");
+                        Debug.LogError("Num Circle Points must be at least 8. No panorama captured.");
                     if (initializeFailed)
                         Debug.LogError("Initialization of Capture Panorama script failed. Cannot capture content.");
                     if (failSound != null && Camera.main != null)
-                        AudioSource.PlayClipAtPoint(failSound, Camera.main.transform.position);
+                        audioSource.PlayOneShot(failSound);
                 }
                 return;
             }
@@ -485,9 +502,25 @@ namespace CapturePanorama
                     yield return null; // If CaptureScreenshot() was called programmatically multiple times, serialize the coroutines
             Capturing = true;
 
+            if (!OnCaptureStart())
+            {
+                audioSource.PlayOneShot(failSound);
+                Capturing = false;
+                yield break;
+            }
+
             // Have to refresh cameras each frame during video in case cameras or image effects change - consider an option for this.
-            var cameras = Camera.allCameras;
+            Camera[] cameras = GetCaptureCameras();
             Array.Sort(cameras, (x, y) => x.depth.CompareTo(y.depth));
+
+            if (cameras.Length == 0)
+            {
+                Debug.LogWarning("No cameras found to capture");
+                audioSource.PlayOneShot(failSound);
+                Capturing = false;
+                yield break;
+            }
+
             // Need to do this first in case we need to reinitialize
             if (antiAliasing != AntiAliasing._1)
             {
@@ -507,7 +540,7 @@ namespace CapturePanorama
             Log("Starting panorama capture");
             if (!captureEveryFrame && startSound != null && Camera.main != null)
             {
-                AudioSource.PlayClipAtPoint(startSound, Camera.main.transform.position);
+                audioSource.PlayOneShot(startSound);
             }
 
             List<ScreenFadeControl> fadeControls = new List<ScreenFadeControl>();
@@ -583,18 +616,18 @@ namespace CapturePanorama
             float startTime = Time.realtimeSinceStartup;
 
             Quaternion headOrientation = Quaternion.identity;
-    #if OVR_SUPPORT
+#if OVR_SUPPORT
             if (OVRManager.display != null)
             {
                 headOrientation = OVRManager.display.GetHeadPose(0.0).orientation;
             }
-    #endif
-    #if UNITY_5_1
+#endif
+#if UNITY_5_1
             if (VRSettings.enabled && VRSettings.loadedDevice != VRDeviceType.None)
             {
                 headOrientation = InputTracking.GetLocalRotation(0);
             }
-    #endif
+#endif
 
             Log("Rendering camera views");
             foreach (Camera c in cameras)
@@ -623,6 +656,29 @@ namespace CapturePanorama
             int leftRightPhaseEnd = (ilimit - 2) / 2 + 2;
             int circlePointsRendered = 0;
             int saveCubemapImageNum = 0;
+
+            Log("Changing quality level");
+            int saveQualityLevel = QualitySettings.GetQualityLevel();
+            bool qualitySettingWasChanged = false;
+            string[] qualitySettingNames = QualitySettings.names;
+            if (qualitySetting != qualitySettingNames[saveQualityLevel]) // Don't change if already set to it
+            {
+                for (int i = 0; i < qualitySettingNames.Length; i++)
+                {
+                    string name = qualitySettingNames[i];
+                    if (name == qualitySetting)
+                    {
+                        QualitySettings.SetQualityLevel(i, /*applyExpensiveChanges*/false); // applyExpensiveChanges causes trouble
+                        qualitySettingWasChanged = true;
+                    }
+                }
+                if (qualitySetting != "" && !qualitySettingWasChanged)
+                {
+                    Debug.LogError("Quality setting specified for CapturePanorama is invalid, ignoring.", this);
+                }
+            }
+
+            BeforeRenderPanorama();
 
             RenderTexture.active = null;
             for (int i = 0; i < ilimit; i++)
@@ -681,18 +737,18 @@ namespace CapturePanorama
 
                 foreach (Camera c in cameras)
                 {
-                    if (c.gameObject.name.Contains("RightEye"))
-                        continue; // Only render left eyes
-
                     // To get the camera in the right eye position, migrate the camera transform to camGos[0]
                     camGos[2].transform.parent = null;
+                    
                     cam.CopyFrom(c);
+
+                    // TODO: Determine if we should reset matrices of the camera in case it's using custom transform matrices
+                    
                     camGos[0].transform.localPosition = cam.transform.localPosition;
                     camGos[0].transform.localRotation = cam.transform.localRotation;
                     camGos[2].transform.parent = camGos[1].transform;
                     cam.transform.localPosition = Vector3.zero;
                     cam.transform.localRotation = Quaternion.identity;
-
                     copyCameraScript.enabled = methodMap[c].Count > 0;
                     copyCameraScript.onRenderImageMethods = methodMap[c];
                     cam.fieldOfView = vFov; // hFov inferred from aspect ratio of target
@@ -705,6 +761,8 @@ namespace CapturePanorama
                         camGos[0].transform.rotation = Quaternion.identity;
 
                     cam.targetTexture = cubemapRenderTexture;
+                    // Aspect ratio must be determined by size of render target. This is critical when Unity native VR is enabled.
+                    cam.ResetAspect();
 
                     // Temporarily set original camera to same position/rotation/field of view as
                     // rendering camera during render. If any image effects examine camera
@@ -791,6 +849,12 @@ namespace CapturePanorama
 
                 RenderTexture.active = null;
             }
+
+            AfterRenderPanorama();
+
+            Log("Resetting quality level");
+            if (qualitySettingWasChanged)
+                QualitySettings.SetQualityLevel(saveQualityLevel, /*applyExpensiveChanges*/false);
 
             // If we need to access the cubemap pixels on the CPU, retrieve them now
             if (saveCubemap || !usingGpuTransform)
@@ -907,14 +971,46 @@ namespace CapturePanorama
                 if (!producedImageSuccess)
                 {
                     if (failSound != null && Camera.main != null)
-                        AudioSource.PlayClipAtPoint(failSound, Camera.main.transform.position);
+                        audioSource.PlayOneShot(failSound);
                 }
                 else if (!captureEveryFrame && doneSound != null && Camera.main != null)
                 {
-                    AudioSource.PlayClipAtPoint(doneSound, Camera.main.transform.position);
+                    audioSource.PlayOneShot(doneSound);
                 }
                 Capturing = false;
             }
+        }
+
+        public virtual bool OnCaptureStart()
+        {
+            return true;
+        }
+
+        public virtual Camera[] GetCaptureCameras()
+        {
+            Camera[] cameras = Camera.allCameras;
+
+            var finalCameras = new List<Camera>();
+            foreach (Camera c in cameras)
+            {
+#if OVR_SUPPORT
+                if (c.gameObject.name.Contains("RightEye"))
+                    continue; // Only render left eyes
+#endif
+                finalCameras.Add(c);
+            }
+
+            return finalCameras.ToArray();
+        }
+
+        public virtual void BeforeRenderPanorama()
+        {
+            // Do nothing, for overriding only
+        }
+
+        public virtual void AfterRenderPanorama()
+        {
+            // Do nothing, for overriding only
         }
 
         private static void ReportOutOfGraphicsMemory()
@@ -1022,16 +1118,16 @@ namespace CapturePanorama
             yield return w;
             if (!string.IsNullOrEmpty(w.error))
             {
-                Debug.LogError(w.error, this);
+                Debug.LogError("Panorama upload failed: " + w.error, this);
                 if (failSound != null && Camera.main != null)
-                    AudioSource.PlayClipAtPoint(failSound, Camera.main.transform.position);
+                    audioSource.PlayOneShot(failSound);
             }
             else
             {
                 Log("Time to upload panorama screenshot: " + (Time.realtimeSinceStartup - startTime) + " sec");
                 if (!captureEveryFrame && doneSound != null && Camera.main != null)
                 {
-                    AudioSource.PlayClipAtPoint(doneSound, Camera.main.transform.position);
+                    audioSource.PlayOneShot(doneSound);
                 }
             }
             Capturing = false;

@@ -13,17 +13,20 @@ namespace CapturePanorama
 
         void Start()
         {
+            if (Application.isEditor)
+                return;
+
+            CapturePanorama pano = GetComponent<CapturePanorama>();
             string path = iniPath;
             if (path == "")
             {
                 string filename = "CapturePanorama.ini";
                 path = Application.dataPath + "/" + filename;
-                if (!File.Exists(path))
-                    path = Application.dataPath + "/CapturePanorama/Config/" + filename;
             }
             if (!File.Exists(path))
             {
-                Debug.LogError("Could not find CapturePanorama.ini. Please supply path in Ini Path property.");
+                // INI file does not exist, creating instead
+                WriteConfig(path, pano);
                 return;
             }
 
@@ -35,7 +38,6 @@ namespace CapturePanorama
                 string[] splitLine = line.Split(new char[] { '=' }, 2);
                 string key = splitLine[0].Trim();
                 string val = splitLine[1].Trim();
-                CapturePanorama pano = GetComponent<CapturePanorama>();
 
                 if (key == "Panorama Name")
                     pano.panoramaName = val;
@@ -83,6 +85,35 @@ namespace CapturePanorama
                     pano.enableDebugging = bool.Parse(val);
                 else
                     Debug.LogError("Unrecognized key in line in CapturePanorama.ini: " + line);
+            }
+        }
+
+        private void WriteConfig(string path, CapturePanorama pano)
+        {
+            using (var writer = new StreamWriter(path))
+            {
+                writer.WriteLine("Panorama Name" + "=" + pano.panoramaName);
+                writer.WriteLine("Capture Key" + "=" + pano.captureKey);
+                writer.WriteLine("Image Format" + "=" + pano.imageFormat);
+                writer.WriteLine("Capture Stereoscopic" + "=" + pano.captureStereoscopic);
+                writer.WriteLine("Interpupillary Distance" + "=" + pano.interpupillaryDistance);
+                writer.WriteLine("Num Circle Points" + "=" + pano.numCirclePoints);
+                writer.WriteLine("Panorama Width" + "=" + pano.panoramaWidth);
+                writer.WriteLine("Anti Aliasing" + "=" + (int)pano.antiAliasing);
+                writer.WriteLine("Ssaa Factor" + "=" + pano.ssaaFactor);
+                writer.WriteLine("Save Image Path" + "=" + pano.saveImagePath);
+                writer.WriteLine("Save Cubemap" + "=" + pano.saveCubemap);
+                writer.WriteLine("Upload Images" + "=" + pano.uploadImages);
+                writer.WriteLine("Use Default Orientation" + "=" + pano.useDefaultOrientation);
+                writer.WriteLine("Use Gpu Transform" + "=" + pano.useGpuTransform);
+                writer.WriteLine("Cpu Milliseconds Per Frame" + "=" + pano.cpuMillisecondsPerFrame);
+                writer.WriteLine("Capture Every Frame" + "=" + pano.captureEveryFrame);
+                writer.WriteLine("Frame Rate" + "=" + pano.frameRate);
+                writer.WriteLine("Max Frames To Record" + "=" + pano.maxFramesToRecord);
+                writer.WriteLine("Frame Number Digits" + "=" + pano.frameNumberDigits);
+                writer.WriteLine("Fade During Capture" + "=" + pano.fadeDuringCapture);
+                writer.WriteLine("Fade Time" + "=" + pano.fadeTime);
+                writer.WriteLine("Enable Debugging" + "=" + pano.enableDebugging);
             }
         }
     }
