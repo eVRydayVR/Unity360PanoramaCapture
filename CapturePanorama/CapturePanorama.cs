@@ -623,9 +623,27 @@ public class CapturePanorama : MonoBehaviour
                 if (useDefaultOrientation)
                     camGos[0].transform.rotation = Quaternion.identity;
 
-                cam.depthTextureMode = DepthTextureMode.None;
                 cam.targetTexture = cubemapRenderTexture;
+
+                // Temporarily set original camera to same position/rotation/field of view as
+                // rendering camera during render. If any image effects examine camera
+                // orientation/FOV this will ensure they behave correctly.
+
+                Vector3 savePosition = c.transform.position;
+                Quaternion saveRotation = c.transform.rotation;
+                float saveFieldOfView = c.fieldOfView;
+                RenderTexture saveRenderTexture = c.targetTexture;
+
+                c.transform.position = cam.transform.position;
+                c.transform.rotation = cam.transform.rotation;
+                c.fieldOfView = cam.fieldOfView;
+
                 cam.Render();
+
+                c.transform.position = savePosition;
+                c.transform.rotation = saveRotation;
+                c.fieldOfView = saveFieldOfView;
+                c.targetTexture = saveRenderTexture;
             }
                 
             // Read one pixel from texture to force render to complete before continuing
