@@ -66,6 +66,8 @@ public class ReadPanoConfig : MonoBehaviour
                 pano.captureEveryFrame = bool.Parse(val);
             else if (key == "Frame Rate")
                 pano.frameRate = int.Parse(val);
+            else if (key == "Max Frames To Record")
+                pano.maxFramesToRecord = val == "" ? 0 : int.Parse(val);
             else if (key == "Frame Number Digits")
                 pano.frameNumberDigits = int.Parse(val);
             else if (key == "Fade During Capture")

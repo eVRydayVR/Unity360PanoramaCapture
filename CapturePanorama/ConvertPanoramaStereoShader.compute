@@ -11,19 +11,23 @@ int cameraHeight;
 float tanHalfHFov, tanHalfVFov, hFovAdjust, vFovAdjust, interpupillaryDistance, circleRadius;
 int numCirclePoints;
 int circlePointStart, circlePointEnd, circlePointCircularBufferStart, circlePointCircularBufferSize;
+int leftRightPass;
+int forceWaitValue;
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 {
+	if (dtid.x >= equirectangularWidth || dtid.y >= equirectangularHeight) // In case width/height not multiple of numthreads
+	    return;
+	if (dtid.x == equirectangularWidth - 1 && dtid.y == equirectangularHeight - 1 && dtid.z == 1)
+	    forceWaitResultBuffer[0] = forceWaitValue; // Used on CPU side to force a wait for this operation to complete
+
 	static const float pi = 3.14159265f;
 	int2 pos = dtid.xy;
 	int2 loopStart = pos * ssaaFactor;
 	int2 loopEnd = loopStart + int2(ssaaFactor, ssaaFactor);
 
 	int i = dtid.z;
-
-	if (dtid.x >= equirectangularWidth || dtid.y >= equirectangularHeight) // In case width/height not multiple of numthreads
-	    return;
 
 	float4 totalColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
@@ -59,8 +63,6 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 			// float3 pos = eyesRotation * initialEyePosition; // eye position
 			// float3 dir = eyesRotation * float3.forward; // gaze direction
 
-			float3 pos = float3(-cosLong * scaledEyeRadius, 0.0f, sinLong * scaledEyeRadius);
-			if (i == 1) pos = -pos;
 			float3 dir = float3(sinLong, 0.0f, cosLong);
 
 			// Find place on circle where gaze ray crosses circle.
@@ -159,31 +161,31 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 
 				// Select which of the two cameras for this point to use and adjust ray to make camera plane perpendicular to axes
 				// 2 + because first two are top/bottom
-				int cameraNumBase = 2 + ((circlePoint0 + j + circlePointCircularBufferStart - circlePointStart) % circlePointCircularBufferSize) * 4;
+				int cameraNumBase = 2 + ((circlePoint0 + j + circlePointCircularBufferStart - circlePointStart) % circlePointCircularBufferSize) * 2;
 
-				cameraNum = cameraNumBase + (newLongitude >= 0.0f ? 1 : 0);
-                        
-				float longitudeAdjust = (newLongitude >= 0.0f ? -hFovAdjust : hFovAdjust);
-				float longSum = newLongitude + longitudeAdjust;
-				float sinLongSum, cosLongSum;
-				sincos(longSum, sinLongSum, cosLongSum);
+				float3 textureRayDirAdjusted;
 
-				// Equivalent to:
-				// float3 textureRayDir = Quaternion.Euler(-latitude * 360.0f / (2 * pi), newLongitude * 360.0f / (2 * pi), 0.0f) * float3.forward;
-				// float3 textureRayDirAdjusted = Quaternion.Euler(0.0f, longitudeAdjust * 360.0f / (2 * pi), 0.0f) * textureRayDir;
-				float3 textureRayDirAdjusted = float3(cosLat * sinLongSum, sinLat, cosLat * cosLongSum);
-				// float3 textureRayDirAdjusted = float3(
-				//     sin(latitude + newLongitude + longitudeAdjust) - sinLat * cosLongSum,
-				//     sinLat,
-				//     cos(latitude + newLongitude + longitudeAdjust) + sinLat * sinLongSum);
-
-				u =  textureRayDirAdjusted.x / textureRayDirAdjusted.z / tanHalfHFov;
-				v = -textureRayDirAdjusted.y / textureRayDirAdjusted.z / tanHalfVFov;
-
-				// There's a lot of vertical overlap so don't accept v near the edge of the left/right cameras, to avoid artifact pixels
-				if (! (textureRayDirAdjusted.z > 0.0f && u * u <= 1.0f && v * v <= 1.0f - 0.1f) )
+				if (leftRightPass)
 				{
-					cameraNum = cameraNumBase + (latitude >= 0.0f ? 3 : 2);
+					cameraNum = cameraNumBase + (newLongitude >= 0.0f ? 1 : 0);
+                        
+					float longitudeAdjust = (newLongitude >= 0.0f ? -hFovAdjust : hFovAdjust);
+					float longSum = newLongitude + longitudeAdjust;
+					float sinLongSum, cosLongSum;
+					sincos(longSum, sinLongSum, cosLongSum);
+
+					// Equivalent to:
+					// float3 textureRayDir = Quaternion.Euler(-latitude * 360.0f / (2 * pi), newLongitude * 360.0f / (2 * pi), 0.0f) * float3.forward;
+					// float3 textureRayDirAdjusted = Quaternion.Euler(0.0f, longitudeAdjust * 360.0f / (2 * pi), 0.0f) * textureRayDir;
+					textureRayDirAdjusted = float3(cosLat * sinLongSum, sinLat, cosLat * cosLongSum);
+					// float3 textureRayDirAdjusted = float3(
+					//     sin(latitude + newLongitude + longitudeAdjust) - sinLat * cosLongSum,
+					//     sinLat,
+					//     cos(latitude + newLongitude + longitudeAdjust) + sinLat * sinLongSum);
+				}
+				else // if (!leftRightPass)
+				{
+					cameraNum = cameraNumBase + (latitude >= 0.0f ? 1 : 0);
 					float latitudeAdjust = (latitude >= 0.0f ? vFovAdjust : -vFovAdjust);
 					float sinLatAdjust, cosLatAdjust;
 					sincos(latitudeAdjust, sinLatAdjust, cosLatAdjust);
@@ -194,10 +196,13 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 					textureRayDirAdjusted = float3(cosLat * sinNewLong,
 					 							   cosLatAdjust * sinLat - cosLat * cosNewLong * sinLatAdjust,
 					 							   sinLatAdjust * sinLat + cosLat * cosNewLong * cosLatAdjust);
-
-					u =  textureRayDirAdjusted.x / textureRayDirAdjusted.z / tanHalfHFov;
-					v = -textureRayDirAdjusted.y / textureRayDirAdjusted.z / tanHalfVFov;
 				}
+
+				u =  textureRayDirAdjusted.x / textureRayDirAdjusted.z / tanHalfHFov;
+				v = -textureRayDirAdjusted.y / textureRayDirAdjusted.z / tanHalfVFov;
+
+				if (! (textureRayDirAdjusted.z > 0.0f && u * u <= 1.0f && v * v <= 1.0f) )
+					return;
 
 				u = (u + 1.0f) * 0.5f;
         		v = (v + 1.0f) * 0.5f;
@@ -243,7 +248,4 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 	totalColor /= ssaaFactor * ssaaFactor;
 	result[((dtid.y + equirectangularHeight * i) * equirectangularWidth) + dtid.x] =
 		((int)totalColor.r << 16) | ((int)totalColor.g << 8) | (int)totalColor.b;
-
-	if (dtid.x == 0 && dtid.y == 0 && dtid.z == 0)
-	    forceWaitResultBuffer[0] = 1; // Used on CPU side to force a wait for this operation to complete
 }

@@ -1,5 +1,5 @@
 Unity Script: 360 Panorama Capture
-Version 1.2 - 2015 July 24 (Unity 5.1.2f1)
+Version 1.3 - 2015 August 2 (Unity 5.1.2f1)
 
 Captures a 360-degree panorama of the player's in-game surroundings and saves/uploads it for later viewing.
 
@@ -72,11 +72,11 @@ Properties on the Capture Panorama script:
 
 * Image Format (default PNG): Determines what format(s) to save/upload the image file in. JPEG produces smaller filesize but is much lower quality. BMP is faster to save than PNG but larger.
 
-* Capture Stereoscopic (default false): Captures a top/bottom (over/under) image suitable for stereoscopic (3D) viewing. May produce artifacts. Generally you want to reduce Panorama Width when enabling this option.
+* Capture Stereoscopic (default false): Captures a top/bottom (over/under) image suitable for stereoscopic (3D) viewing. May produce artifacts. Be sure to set Panorama Width, Interpupillary Distance, and Num Circle Points appropriately when enabling this option.
 
-* Interpupillary Distance (stereoscopic only): Distance between the eye pupils of the viewer in meters. Defaults to average IPD from U.S. Army survey.
+* Interpupillary Distance (stereoscopic only): Distance between the eye pupils of the viewer in Unity units. Defaults to average IPD in meters from U.S. Army survey.
 
-* Num Circle Points (stereoscopic only): Determines at how many points to capture the surroundings. Smaller values are faster while larger values reduce ghosting/doubling artifacts on nearby objects. Should increase when increasing Panorama Width.
+* Num Circle Points (stereoscopic only): Determines at how many points to capture the surroundings. Smaller values are faster while larger values reduce ghosting/doubling artifacts on nearby objects. A good starting point is Panorama Width divided by 32.
 
 * Panorama Width (between 4 and 23800, default 8192): Determines width of the resulting panorama image. Height of the image will be half this. Typical reasonable values are 4096 and 8192. Need not be a power of two. At large values, black bars may appear in output images, indicating graphics memory has been exhausted.
 
@@ -101,6 +101,8 @@ In stereoscopic mode this option will save all captured camera images (stereo cu
 * Capture Every Frame (default off): When enabled, the Capture Key will start and stop the capturing of every frame to an image sequence.
 
 * Frame Rate (default 30): Sets the frame rate used during capturing when Capture Every Frame is enabled. Determines what Time.captureFramerate will be set to.
+
+* Max Frames To Record: If nonzero, will automatically stop after capturing this many frames.
 
 * Frame Number Digits: When Capture Every Frame is enabled, this determines the number of digits to use for the frame number in the filenames of the image sequence (default 6, sufficient for 4.6 hours at 60 FPS).
 
@@ -131,7 +133,9 @@ The ReadPanoConfig script allows users to modify panorama capture parameters in 
 DEVELOPMENT NOTES
 -----------------
 
-In scenes using the OVR plugin, the left eye will be used as the point of rendering. The package supports scenes with multiple cameras or OVR camera rigs, each with different culling masks. They will be composited based on depth to reproduce the player's view. Some effects such as camera shaders may not be reproduced.
+In scenes using the OVR plugin, the left eye will be used as the point of rendering. The package supports scenes with multiple cameras or OVR camera rigs, each with different culling masks. They will be composited based on depth to reproduce the player's view.
+
+As of version 1.3 image effects will be reproduced.
 
 If you need to determine if a panorama capture is in process (e.g. to wait for the capture to complete), you can check the "Capturing" property.
 

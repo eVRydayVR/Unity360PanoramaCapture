@@ -7,13 +7,18 @@ RWStructuredBuffer<uint> forceWaitResultBuffer;
 int width, height;
 SamplerState MyPointRepeatSampler;
 int startIdx;
+int forceWaitValue;
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void TextureToBuffer (uint3 id : SV_DispatchThreadID)
 {
+	if (id.x >= width || id.y >= height) // In case width/height not multiple of numthreads
+	    return;
+
 	float4 color = source.SampleLevel(MyPointRepeatSampler, float2(((float)id.x + 0.5)/ width, ((float)id.y + 0.5)/ height), 0);
 	color *= 255.0;
 	result[startIdx + (id.y * width) + id.x] = ((int)color.r << 16) | ((int)color.g << 8) | (int)color.b;
-	if (id.x == 0 && id.y == 0)
-	    forceWaitResultBuffer[0] = 1; // Used on CPU side to force a wait for this copy operation to complete
+
+	if (id.x == width - 1 && id.y == height - 1 && id.z == 0)
+        forceWaitResultBuffer[0] = forceWaitValue; // Used on CPU side to force a wait for this operation to complete
 }
