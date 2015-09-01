@@ -439,11 +439,16 @@ namespace CapturePanorama
 
         public void CaptureScreenshotSync(string filenameBase)
         {
-            var enumerator = CaptureScreenshotAsyncHelper(filenameBase, /*async*/false);
-            while (enumerator.MoveNext()) { }
+            StartCoroutine(CaptureScreenshotSyncHelper(filenameBase));
         }
 
-    
+        public IEnumerator CaptureScreenshotSyncHelper(string filenameBase)
+        {
+            yield return new WaitForEndOfFrame(); // Must capture at end of frame to assure we correctly capture world-space UIs
+            // Do the rest purely synchronously
+            var enumerator = CaptureScreenshotAsyncHelper(filenameBase, /*async*/false);
+            while (enumerator.MoveNext()) { }
+        }    
 
         public void CaptureScreenshotAsync(string filenameBase)
         {
