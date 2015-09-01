@@ -53,6 +53,10 @@ The parameters are:
 * The CRF quality, typical range 14 for very good with large file to 24 for mediocre with small file;
 * The encoding preset which trades off encoding time and quality, with "ultrafast" producing the largest file the most quickly. This also avoids certain encoding failures.
 
+Alternatively, in Adobe Premiere Pro you can import the sequence directly using these instructions:
+
+https://helpx.adobe.com/premiere-pro/using/importing-still-images.html#import_numbered_still_image_sequences_as_video_clips
+
 REFERENCE
 ---------
 
@@ -63,6 +67,12 @@ Properties on the Capture Panorama script:
 * Capture Key (default "P"): the key to press to capture a 360 screenshot. If you wish to handle your own input, set this to "None" and invoke the CaptureScreenshotAsync() method from your script. If "Capture Every Frame" is enabled, this start and stop capturing of the image sequence.
 
 * Image Format (default PNG): Determines what format(s) to save/upload the image file in. JPEG produces smaller filesize but is much lower quality. BMP is faster to save than PNG but larger.
+
+* Capture Stereoscopic (default false): Captures a dual-360 top/bottom (over/under) image suitable for stereoscopic (3D) viewing. May produce artifacts such as ghosting/doubling.
+
+* Interpupillary Distance (stereoscopic only): Distance between the eye pupils of the viewer in meters. Defaults to average IPD from U.S. Army survey.
+
+* Num Circle Points (stereoscopic only): Determines at how many points to capture the surroundings. Smaller values are faster while larger values reduce ghosting/doubling artifacts on nearby objects.
 
 * Panorama Width (between 4 and 23800, default 8192): Determines width of the resulting panorama image. Height of the image will be half this. Typical reasonable values are 4096 and 8192. Need not be a power of two.
 

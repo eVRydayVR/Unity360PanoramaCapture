@@ -54,6 +54,7 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
             circlePointAngle = atan2(circlePoint.x, circlePoint.z);
         }
         if (circlePointAngle < 0.0f) circlePointAngle += 2 * pi;
+        if (circlePointAngle >= 2 * pi) circlePointAngle -= 2 * pi;
 
         float circlePointNumber = circlePointAngle / (2 * pi) * numCirclePoints;
         int circlePoint0 = (int)floor(circlePointNumber) % numCirclePoints;
@@ -141,7 +142,7 @@ void RenderStereo (uint3 dtid : SV_DispatchThreadID)
 			float b = lerp(lerp( topLeft         & 0xFF,  bottomLeft         & 0xFF, vFrac),
 						   lerp( topRight        & 0xFF,  bottomRight        & 0xFF, vFrac), uFrac);
 
-			float4 col = float4(r, g, b, 1.0f);
+			float4 col = float4(r, g, b, 255.0f);
             if (j == 0) color0 = col; else color1 = col;
         }
 

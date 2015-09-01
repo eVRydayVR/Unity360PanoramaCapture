@@ -3,12 +3,7 @@
 #pragma kernel CubeMapToEquirectangularNegativeY
 
 RWStructuredBuffer<uint> result;
-Texture2D<float4> cubemapFacePositiveY;
-Texture2D<float4> cubemapFaceNegativeY;
-Texture2D<float4> cubemapFacePositiveX;
-Texture2D<float4> cubemapFaceNegativeX;
-Texture2D<float4> cubemapFacePositiveZ;
-Texture2D<float4> cubemapFaceNegativeZ;
+StructuredBuffer<uint> cameraPixels;
 SamplerState MyLinearClampSampler;
 int equirectangularWidth;
 int equirectangularHeight;
@@ -20,6 +15,14 @@ int startY;
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 {
+    // Must match enum UnityEngine.CubemapFace
+    static const int PositiveX = 0;
+    static const int NegativeX = 1;
+    static const int PositiveY = 2;
+    static const int NegativeY = 3;
+    static const int PositiveZ = 4;
+    static const int NegativeZ = 5;
+
 	static const float pi = 3.14159265f;
 	float4 totalColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
@@ -43,82 +46,86 @@ void CubeMapToEquirectangular (uint3 dtid : SV_DispatchThreadID)
 
 			float distance;
 			float u, v;
-			float maxWidth  = 1.0f - 1.0f/cameraWidth;
-			float maxHeight = 1.0f - 1.0f/cameraHeight;
+			int cameraNum;
 
 			distance = 1.0f / equirectRayDirectionY;
 			u = equirectRayDirectionX * distance; v = equirectRayDirectionZ * distance;
 			if (u * u <= 1 && v * v <= 1) {
-				v = (v + 1.0f) * 0.5f;
-				v = min(v, maxHeight);
 				if (equirectRayDirectionY > 0.0f) {
-					u = (u + 1.0f) * 0.5f;
-					u = min(u, maxWidth);
-			
-					totalColor += cubemapFacePositiveY.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
-					continue;
+					cameraNum = PositiveY;
 				} else {
 					u = -u;
-					u = (u + 1.0f) * 0.5f;
-					u = min(u, maxWidth);
-			
-					totalColor += cubemapFaceNegativeY.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
-					continue;
+					cameraNum = NegativeY;
 				}
 			}
-	
-			distance = 1.0f / equirectRayDirectionX;
-			u = -equirectRayDirectionZ * distance; v = equirectRayDirectionY * distance;
-			if (u * u <= 1 && v * v <= 1) {
-				u = (u + 1.0f) * 0.5f;
-				u = min(u, maxWidth);
-				if (equirectRayDirectionX > 0.0f) {
-					v = -v;
-					v = (v + 1.0f) * 0.5f;
-					v = min(v, maxHeight);
-			
-					totalColor += cubemapFacePositiveX.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
-					continue;
-				} else {
-					v = (v + 1.0f) * 0.5f;
-					v = min(v, maxHeight);
-			
-					totalColor += cubemapFaceNegativeX.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
-					continue;
+	        else
+			{
+				distance = 1.0f / equirectRayDirectionX;
+				u = -equirectRayDirectionZ * distance; v = equirectRayDirectionY * distance;
+				if (u * u <= 1 && v * v <= 1) {
+					if (equirectRayDirectionX > 0.0f) {
+						v = -v;
+						cameraNum = PositiveX;
+					} else {
+						cameraNum = NegativeX;
+					}
+				}
+				else
+				{
+					distance = 1.0f / equirectRayDirectionZ;
+					u = equirectRayDirectionX * distance; v = equirectRayDirectionY * distance;
+					if (u * u <= 1 && v * v <= 1) {
+						if (equirectRayDirectionZ > 0.0f) {
+							v = -v;
+							cameraNum = PositiveZ;
+						} else {
+							cameraNum = NegativeZ;
+						}
+					}
 				}
 			}
 
-			distance = 1.0f / equirectRayDirectionZ;
-			u = equirectRayDirectionX * distance; v = equirectRayDirectionY * distance;
-			if (u * u <= 1 && v * v <= 1) {
-				u = (u + 1.0f) * 0.5f;
-				u = min(u, maxWidth);
-				if (equirectRayDirectionZ > 0.0f) {
-					v = -v;
-					v = (v + 1.0f) * 0.5f;
-					v = min(v, maxHeight);
-			
-					totalColor += cubemapFacePositiveZ.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
-					continue;
-				} else {
-					v = (v + 1.0f) * 0.5f;
-					v = min(v, maxHeight);
-			
-					totalColor += cubemapFaceNegativeZ.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
-					continue;
-				}
-			}
+			u = (u + 1.0f) * 0.5f;
+			v = (v + 1.0f) * 0.5f;
+
+			// GetCameraPixelBilinear(cameraPixels, cameraNum, u, v);
+
+			u *= cameraWidth;
+			v *= cameraHeight;
+			int left   = min(cameraWidth  - 1, (int)floor(u)); // Modified to add check
+			int right  = min(cameraWidth  - 1, left + 1);
+			int top    = min(cameraHeight - 1, (int)floor(v)); // Modified to add check
+			int bottom = min(cameraHeight - 1, top  + 1);
+			float uFrac = frac(u);
+			float vFrac = frac(v);
+
+			int baseIdx = cameraNum * cameraWidth * cameraHeight;
+			int topRow    = baseIdx + top    * cameraWidth;
+			int bottomRow = baseIdx + bottom * cameraWidth;
+			uint topLeft     = cameraPixels[topRow    + left ];
+			uint topRight    = cameraPixels[topRow    + right];
+			uint bottomLeft  = cameraPixels[bottomRow + left ];
+			uint bottomRight = cameraPixels[bottomRow + right];
+
+			float r = lerp(lerp( topLeft  >> 16        ,  bottomLeft  >> 16        , vFrac),
+				           lerp( topRight >> 16        ,  bottomRight >> 16        , vFrac), uFrac);
+			float g = lerp(lerp((topLeft  >>  8) & 0xFF, (bottomLeft  >>  8) & 0xFF, vFrac),
+					       lerp((topRight >>  8) & 0xFF, (bottomRight >>  8) & 0xFF, vFrac), uFrac);
+			float b = lerp(lerp( topLeft         & 0xFF,  bottomLeft         & 0xFF, vFrac),
+						   lerp( topRight        & 0xFF,  bottomRight        & 0xFF, vFrac), uFrac);
+
+			totalColor += float4(r, g, b, 255.0f);
 		}
 	}
 
 	totalColor /= ssaaFactor * ssaaFactor;
-	totalColor *= 255.0;
 	result[(dtid.y * equirectangularWidth) + dtid.x] = ((int)totalColor.r << 16) | ((int)totalColor.g << 8) | (int)totalColor.b;
 }
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void CubeMapToEquirectangularPositiveY (uint3 dtid : SV_DispatchThreadID)
 {
+    static const int cameraNum = 2; /* PositiveY */
 	static const float pi = 3.14159265f;
 	float4 totalColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
@@ -142,20 +149,48 @@ void CubeMapToEquirectangularPositiveY (uint3 dtid : SV_DispatchThreadID)
 
 			float distance = 1.0f / equirectRayDirectionY;
 			float u = equirectRayDirectionX * distance, v = equirectRayDirectionZ * distance;
-			v = (v + 1.0f) * 0.5f;
+
 			u = (u + 1.0f) * 0.5f;
-			totalColor += cubemapFacePositiveY.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
+			v = (v + 1.0f) * 0.5f;
+			
+			// GetCameraPixelBilinear(cameraPixels, cameraNum, u, v);
+
+			u *= cameraWidth;
+			v *= cameraHeight;
+			int left   = (int)floor(u);
+			int right  = min(cameraWidth  - 1, left + 1);
+			int top    = (int)floor(v);
+			int bottom = min(cameraHeight - 1, top  + 1);
+			float uFrac = frac(u);
+			float vFrac = frac(v);
+
+			int baseIdx = cameraNum * cameraWidth * cameraHeight;
+			int topRow    = baseIdx + top    * cameraWidth;
+			int bottomRow = baseIdx + bottom * cameraWidth;
+			uint topLeft     = cameraPixels[topRow    + left ];
+			uint topRight    = cameraPixels[topRow    + right];
+			uint bottomLeft  = cameraPixels[bottomRow + left ];
+			uint bottomRight = cameraPixels[bottomRow + right];
+
+			float r = lerp(lerp( topLeft  >> 16        ,  bottomLeft  >> 16        , vFrac),
+				           lerp( topRight >> 16        ,  bottomRight >> 16        , vFrac), uFrac);
+			float g = lerp(lerp((topLeft  >>  8) & 0xFF, (bottomLeft  >>  8) & 0xFF, vFrac),
+					       lerp((topRight >>  8) & 0xFF, (bottomRight >>  8) & 0xFF, vFrac), uFrac);
+			float b = lerp(lerp( topLeft         & 0xFF,  bottomLeft         & 0xFF, vFrac),
+						   lerp( topRight        & 0xFF,  bottomRight        & 0xFF, vFrac), uFrac);
+
+			totalColor += float4(r, g, b, 255.0f);
 		}
 	}
 
 	totalColor /= ssaaFactor * ssaaFactor;
-	totalColor *= 255.0;
 	result[(dtid.y * equirectangularWidth) + dtid.x] = ((int)totalColor.r << 16) | ((int)totalColor.g << 8) | (int)totalColor.b;
 }
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void CubeMapToEquirectangularNegativeY (uint3 dtid : SV_DispatchThreadID)
 {
+    static const int cameraNum = 3; /* NegativeY */
 	static const float pi = 3.14159265f;
 	float4 totalColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
@@ -179,15 +214,41 @@ void CubeMapToEquirectangularNegativeY (uint3 dtid : SV_DispatchThreadID)
 
 			float distance = 1.0f / equirectRayDirectionY;
 			float u = equirectRayDirectionX * distance, v = equirectRayDirectionZ * distance;
-			v = (v + 1.0f) * 0.5f;
 			u = -u;
+
 			u = (u + 1.0f) * 0.5f;
+			v = (v + 1.0f) * 0.5f;
 			
-			totalColor += cubemapFaceNegativeY.SampleLevel(MyLinearClampSampler, float2(u,v), 0);
+			// GetCameraPixelBilinear(cameraPixels, cameraNum, u, v);
+
+			u *= cameraWidth;
+			v *= cameraHeight;
+			int left   = (int)floor(u);
+			int right  = min(cameraWidth  - 1, left + 1);
+			int top    = (int)floor(v);
+			int bottom = min(cameraHeight - 1, top  + 1);
+			float uFrac = frac(u);
+			float vFrac = frac(v);
+
+			int baseIdx = cameraNum * cameraWidth * cameraHeight;
+			int topRow    = baseIdx + top    * cameraWidth;
+			int bottomRow = baseIdx + bottom * cameraWidth;
+			uint topLeft     = cameraPixels[topRow    + left ];
+			uint topRight    = cameraPixels[topRow    + right];
+			uint bottomLeft  = cameraPixels[bottomRow + left ];
+			uint bottomRight = cameraPixels[bottomRow + right];
+
+			float r = lerp(lerp( topLeft  >> 16        ,  bottomLeft  >> 16        , vFrac),
+				           lerp( topRight >> 16        ,  bottomRight >> 16        , vFrac), uFrac);
+			float g = lerp(lerp((topLeft  >>  8) & 0xFF, (bottomLeft  >>  8) & 0xFF, vFrac),
+					       lerp((topRight >>  8) & 0xFF, (bottomRight >>  8) & 0xFF, vFrac), uFrac);
+			float b = lerp(lerp( topLeft         & 0xFF,  bottomLeft         & 0xFF, vFrac),
+						   lerp( topRight        & 0xFF,  bottomRight        & 0xFF, vFrac), uFrac);
+
+			totalColor += float4(r, g, b, 255.0f);
 		}
 	}
 
 	totalColor /= ssaaFactor * ssaaFactor;
-	totalColor *= 255.0;
 	result[(dtid.y * equirectangularWidth) + dtid.x] = ((int)totalColor.r << 16) | ((int)totalColor.g << 8) | (int)totalColor.b;
 }
