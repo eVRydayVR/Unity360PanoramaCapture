@@ -39,23 +39,45 @@ namespace CapturePanorama.Internals
             return result;
         }
 
+        RenderTexture[] temp = new RenderTexture[] { null, null };
+
+        void OnDestroy()
+        {
+            for (int i = 0; i < temp.Length; i++)
+            {
+                if (temp[i] != null)
+                    Destroy(temp[i]);
+                temp[i] = null;
+            }
+        }
+
         void OnRenderImage(RenderTexture src, RenderTexture dest)
         {
+            int desiredDepth = Math.Max(src.depth, dest.depth);
+
+            for (int i = 0; i < temp.Length; i++)
+            {
+                if (onRenderImageMethods.Count > i + 1)
+                {
+                    if (temp[i] != null &&
+                        (temp[i].width != dest.width || temp[i].height != dest.height || temp[i].depth != desiredDepth || temp[i].format != dest.format))
+                    {
+                        Destroy(temp[i]);
+                        temp[i] = null;
+                    }
+                    if (temp[i] == null)
+                        temp[i] = new RenderTexture(dest.width, dest.height, desiredDepth, dest.format);
+                }
+            }
+
             var sequence = new List<RenderTexture>();
             sequence.Add(src);
-            RenderTexture temp  = onRenderImageMethods.Count <= 1 ? null : new RenderTexture(dest.width, dest.height, dest.depth, dest.format);
-            RenderTexture temp2 = onRenderImageMethods.Count <= 2 ? null : new RenderTexture(dest.width, dest.height, dest.depth, dest.format);
             for (int i = 0; i < onRenderImageMethods.Count - 1; i++)
-                sequence.Add(i % 2 == 0 ? temp : temp2);
+                sequence.Add(i % 2 == 0 ? temp[0] : temp[1]);
             sequence.Add(dest);
 
             for (int i = 0; i < onRenderImageMethods.Count; i++)
-            {
                 onRenderImageMethods[i].Method.Invoke(onRenderImageMethods[i].Instance, new object[] { sequence[i], sequence[i + 1] });
-            }
-
-            if (temp != null) Destroy(temp);
-            if (temp2 != null) Destroy(temp2);
         }
     }
 }
