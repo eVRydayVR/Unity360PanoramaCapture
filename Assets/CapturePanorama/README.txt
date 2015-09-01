@@ -153,6 +153,8 @@ As of version 1.3 camera image effects will be reproduced.
 
 If you need to determine if a panorama capture is in process (e.g. to wait for the capture to complete), you can check the "Capturing" property.
 
+Archived releases and history available at: https://github.com/eVRydayVR/Unity360PanoramaCapture
+
 CREDITS
 -------
 
