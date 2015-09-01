@@ -31,6 +31,7 @@ public class CapturePanorama : MonoBehaviour
     public ImageFormat imageFormat = ImageFormat.PNG;
     public int panoramaWidth = 8192;
     public string saveImagePath = "";
+    public bool saveCubemap = false;
     public bool uploadImages = false;
     public bool useDefaultOrientation = false;
     public float millisecondsPerFrame = 1000.0f/120.0f;
@@ -285,8 +286,56 @@ public class CapturePanorama : MonoBehaviour
         Log("Resetting quality level");
         QualitySettings.SetQualityLevel(saveQualityLevel, /*applyExpensiveChanges*/true);
 
-        // Render to Cubemap seems to take up to 2 frames to do its thing -
-        // if this is not here, the fade-in will drop frames.
+        string filenamePrefix = String.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss-fff}", panoramaName, DateTime.Now);
+        string suffix = filenameSuffix + ((imageFormat == ImageFormat.JPEG) ? ".jpg" : ".png");
+        string filePath = "";
+        // Save in separate thread to avoid hiccups
+        string imagePath = saveImagePath;
+        if (imagePath == null || imagePath == "")
+        {
+            imagePath = Application.dataPath + "/..";
+        }
+
+        if (saveCubemap)
+        {
+            // Save cubemap while still faded, as fast as possible - should be pretty quick
+            foreach (CubemapFace face in faces)
+            {
+                Color32[] texPixels = cubemapTexs[(int)face].GetPixels32();
+
+                Bitmap bitmap = new Bitmap(cubemapSize, cubemapSize, PixelFormat.Format32bppArgb);
+                var bmpData = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.WriteOnly, bitmap.PixelFormat);
+                IntPtr ptr = bmpData.Scan0;
+                byte[] pixelValues = new byte[Math.Abs(bmpData.Stride) * bitmap.Height];
+                int stride = bmpData.Stride;
+                int width = cubemapSize;
+                int height = bmpData.Height;
+                for (int y = 0; y < cubemapSize; y++)
+                for (int x = 0; x < cubemapSize; x++)
+                {
+                    Color32 c = texPixels[y * width + x];
+                    int baseIdx = stride * (height - 1 - y) + x * 4;
+                    pixelValues[baseIdx + 0] = c.b;
+                    pixelValues[baseIdx + 1] = c.g;
+                    pixelValues[baseIdx + 2] = c.r;
+                    pixelValues[baseIdx + 3] = c.a;
+                }
+                System.Runtime.InteropServices.Marshal.Copy(pixelValues, 0, ptr, pixelValues.Length);
+                bitmap.UnlockBits(bmpData);
+
+                Log("Saving cubemap image " + face.ToString());
+                string cubeFilepath = imagePath + "/" + filenamePrefix + "_" + face.ToString() + suffix;
+                if (imageFormat == ImageFormat.JPEG)
+                    // TODO: Use better image processing library to get decent JPEG quality out.
+                    bitmap.Save(cubeFilepath, DrawingImageFormat.Jpeg);
+                else
+                    bitmap.Save(cubeFilepath, DrawingImageFormat.Png);
+
+                bitmap.Dispose();
+            }
+        }
+
+        // If this is not here, the fade-in will drop frames.
         for (int i = 0; i < 2; i++)
             yield return new WaitForEndOfFrame();
 
@@ -303,52 +352,37 @@ public class CapturePanorama : MonoBehaviour
 
         // Write pixels directly to .NET Bitmap for saving out
         // Based on https://msdn.microsoft.com/en-us/library/5ey6h79d%28v=vs.110%29.aspx
-        Bitmap bitmap = new Bitmap(panoramaWidth, panoramaHeight, PixelFormat.Format32bppArgb);
-        var bmpData = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.WriteOnly, bitmap.PixelFormat);
-        IntPtr ptr = bmpData.Scan0;
-        byte[] pixelValues = new byte[Math.Abs(bmpData.Stride) * bitmap.Height];
-
-        yield return StartCoroutine(CubemapToEquirectangularCpu(cubemapTexs, cubemapSize, pixelValues, bmpData.Stride, panoramaWidth, panoramaHeight));
-
-        yield return null;
-        System.Runtime.InteropServices.Marshal.Copy(pixelValues, 0, ptr, pixelValues.Length);
-        bitmap.UnlockBits(bmpData);
-        yield return null;
-
-        Log("Time to take panorama screenshot: " + (Time.realtimeSinceStartup - startTime) + " sec");
-
-        // Save in separate thread to avoid hiccups
-        string filenamePrefix = String.Format("{0}_{1:yyyy-MM-dd_HH-mm-ss-fff}", panoramaName, DateTime.Now);
-        string imagePath = saveImagePath;
-        if (imagePath == null || imagePath == "")
-        {
-            imagePath = Application.dataPath + "/..";
-        }
-        
-        string filePath = "";
-
-        string suffix = filenameSuffix + ((imageFormat == ImageFormat.JPEG) ? ".jpg" : ".png");
         filePath = imagePath + "/" + filenamePrefix + suffix;
-        var thread = new Thread(() =>
         {
-            Log("Saving equirectangular image");
-            if (imageFormat == ImageFormat.JPEG)
-            {
-                // Try to set JPEG quality to max - doesn't do anything on my system but worth a shot.
-                // TODO: Use better image processing library to get decent JPEG quality out.
-                // Based on http://stackoverflow.com/questions/1484759/quality-of-a-saved-jpg-in-c-sharp
-                var encoder = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
-                var encParams = new System.Drawing.Imaging.EncoderParameters() { Param = new[] { new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 100L) } };
-                bitmap.Save(filePath, encoder, encParams);
-            }
-            else
-            {
-                bitmap.Save(filePath, DrawingImageFormat.Png);
-            }
-        });
-        thread.Start();
-        while (thread.ThreadState == ThreadState.Running)
+            Bitmap bitmap = new Bitmap(panoramaWidth, panoramaHeight, PixelFormat.Format32bppArgb);
+            var bmpData = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.WriteOnly, bitmap.PixelFormat);
+            IntPtr ptr = bmpData.Scan0;
+            byte[] pixelValues = new byte[Math.Abs(bmpData.Stride) * bitmap.Height];
+
+            yield return StartCoroutine(CubemapToEquirectangularCpu(cubemapTexs, cubemapSize, pixelValues, bmpData.Stride, panoramaWidth, panoramaHeight));
+
             yield return null;
+            System.Runtime.InteropServices.Marshal.Copy(pixelValues, 0, ptr, pixelValues.Length);
+            bitmap.UnlockBits(bmpData);
+            yield return null;
+
+            Log("Time to take panorama screenshot: " + (Time.realtimeSinceStartup - startTime) + " sec");
+
+            var thread = new Thread(() =>
+            {
+                Log("Saving equirectangular image");
+                if (imageFormat == ImageFormat.JPEG)
+                    // TODO: Use better image processing library to get decent JPEG quality out.
+                    bitmap.Save(filePath, DrawingImageFormat.Jpeg);
+                else
+                    bitmap.Save(filePath, DrawingImageFormat.Png);
+            });
+            thread.Start();
+            while (thread.ThreadState == ThreadState.Running)
+                yield return null;
+
+            bitmap.Dispose();
+        }
 
         if (uploadImages)
         {

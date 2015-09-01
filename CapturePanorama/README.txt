@@ -33,6 +33,8 @@ Properties on the Capture Panorama script:
 
 * Save Image Path: Directory where screenshots will be saved. If blank, the root application directory will be used.
 
+* Save Cubemap (default off): Check to save the six captured cubemap images to disk. Some software can view these directly. Will increase the time the view is faded out.
+
 * Upload Images (default off): Check to automatically publish panorama screenshots to VRCHIVE for sharing with others immediately after taking them. Visit alpha.vrchive.com to view them. Panoramas are currently uploaded anonymously (not under a user account).
 
 * Use Default Orientation (default off): Resets the camera to the default (directly forward) rotation/orientation before taking the screenshot. May interfere with correct compositing if you have multiple cameras with different rotations. In VR applications, this is usually unnecessary because the headset orientation is used instead to correct the camera orientation.
