@@ -306,6 +306,7 @@ namespace CapturePanorama
             textureToBufferIdx = textureToBufferShader.FindKernel("TextureToBuffer");
             textureToBufferShader.SetInt("width", cameraWidth);
             textureToBufferShader.SetInt("height", cameraHeight);
+            textureToBufferShader.SetFloat("gamma", QualitySettings.activeColorSpace == ColorSpace.Linear ? 1.0f/2.2f : 1.0f);
 
             renderStereoIdx = convertPanoramaStereoShader.FindKernel("RenderStereo");
 

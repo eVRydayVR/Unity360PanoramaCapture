@@ -9,6 +9,7 @@ SamplerState MyPointRepeatSampler;
 uint startIdx;
 uint sentinelIdx;
 uint forceWaitValue;
+float gamma;
 
 [numthreads(32,32,1)] // Must match threadsX, threadsY in CapturePanorama.cs
 void TextureToBuffer (uint3 id : SV_DispatchThreadID)
@@ -17,6 +18,7 @@ void TextureToBuffer (uint3 id : SV_DispatchThreadID)
 	    return;
 
 	float4 color = source.SampleLevel(MyPointRepeatSampler, float2(((float)id.x + 0.5)/ width, ((float)id.y + 0.5)/ height), 0);
+	color = pow(color, gamma);
 	color *= 255.0;
 	result[startIdx + (id.y * width) + id.x] = ((int)color.r << 16u) | ((int)color.g << 8u) | (int)color.b;
 
