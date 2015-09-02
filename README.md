@@ -1,3 +1,4 @@
+![Logo](https://raw.githubusercontent.com/eVRydayVR/Unity360PanoramaCapture/master/Key%20images/thumbnail.png)
 # Unity 360 Panorama Capture
 
 Script for capturing 360-degree panoramas in Unity, released at:
