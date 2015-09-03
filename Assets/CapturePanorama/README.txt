@@ -166,9 +166,9 @@ Default sound effects Clicks_13, Xylo_13, and DistClickBlocked1 from:
 Free SFX Package - Bleep Blop Audio
 https://www.assetstore.unity3d.com/en/#!/content/5178
 
-LICENSE
--------
-Copyright (c) 2015 D Coetzee (eVRydayVR) and other contributors
+LICENSE (MIT License)
+---------------------
+Copyright (c) 2015 D Coetzee (eVRydayVR), VRCHIVE, and other rights-holders
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
