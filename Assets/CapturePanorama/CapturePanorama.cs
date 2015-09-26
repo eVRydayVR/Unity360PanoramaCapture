@@ -466,7 +466,7 @@ namespace CapturePanorama
             // Do the rest purely synchronously
             var enumerator = CaptureScreenshotAsyncHelper(filenameBase, /*async*/false);
             while (enumerator.MoveNext()) { }
-        }    
+        }
 
         public void CaptureScreenshotAsync(string filenameBase)
         {
@@ -566,16 +566,21 @@ namespace CapturePanorama
                 audioSource.PlayOneShot(startSound);
             }
 
+            Camera[] unfilteredCameras = cameras;
+            var filteredCameras = new List<Camera>();
+
             List<ScreenFadeControl> fadeControls = new List<ScreenFadeControl>();
             foreach (Camera c in Camera.allCameras)
             {
                 if (c.isActiveAndEnabled && c.targetTexture == null) // Is a camera visible to the player
                 {
+                    filteredCameras.Add(c);
                     var fadeControl = c.gameObject.AddComponent<ScreenFadeControl>();
                     fadeControl.fadeMaterial = fadeMaterial;
                     fadeControls.Add(fadeControl);
                 }
             }
+            cameras = filteredCameras.ToArray();
             SetFadersEnabled(fadeControls, false);
 
             if (fadeDuringCapture && async)
@@ -765,11 +770,11 @@ namespace CapturePanorama
                 {
                     // To get the camera in the right eye position, migrate the camera transform to camGos[0]
                     camGos[2].transform.parent = null;
-                    
+
                     cam.CopyFrom(c);
 
                     // TODO: Determine if we should reset matrices of the camera in case it's using custom transform matrices
-                    
+
                     camGos[0].transform.localPosition = cam.transform.localPosition;
                     camGos[0].transform.localRotation = cam.transform.localRotation;
                     camGos[2].transform.parent = camGos[1].transform;
@@ -810,7 +815,7 @@ namespace CapturePanorama
                     c.fieldOfView = saveFieldOfView;
                     c.targetTexture = saveRenderTexture;
                 }
-                
+
                 // Read one pixel from texture to force render to complete before continuing
                 RenderTexture.active = cubemapRenderTexture;
                 forceWaitTexture.ReadPixels(new Rect(cameraWidth - 1, cameraHeight - 1, 1, 1), 0, 0);
@@ -1266,14 +1271,14 @@ namespace CapturePanorama
 
                             // Select which of the two cameras for this point to use and adjust ray to make camera plane perpendicular to axes
                             cameraNum = 2 + circlePointIdx * (CamerasPerCirclePoint / 2) + (newLongitude >= 0.0f ? 1 : 0);
-                        
+
                             float longitudeAdjust = (newLongitude >= 0.0f ? -hFovAdjust : hFovAdjust);
                             float longSum = newLongitude + longitudeAdjust;
 
                             // Equivalent to:
                             // Vector3 textureRayDir = Quaternion.Euler(-latitude * 360.0f / (2 * Mathf.PI), newLongitude * 360.0f / (2 * Mathf.PI), 0.0f) * Vector3.forward;
                             // Vector3 textureRayDirAdjusted = Quaternion.Euler(0.0f, longitudeAdjust * 360.0f / (2 * Mathf.PI), 0.0f) * textureRayDir;
-                            Vector3 textureRayDirAdjusted = new Vector3(cosLat * Mathf.Sin(longSum), sinLat, cosLat * Mathf.Cos(longSum)); 
+                            Vector3 textureRayDirAdjusted = new Vector3(cosLat * Mathf.Sin(longSum), sinLat, cosLat * Mathf.Cos(longSum));
 
                             u =  textureRayDirAdjusted.x / textureRayDirAdjusted.z / tanHalfHFov;
                             v = -textureRayDirAdjusted.y / textureRayDirAdjusted.z / tanHalfVFov;
@@ -1476,7 +1481,7 @@ namespace CapturePanorama
                 enumerator = CubemapToEquirectangularCpuPositiveZ(cameraPixels, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, numPixelsAveraged,
                     startZPositive, endTopMixedRegion, endZPositive, startBottomMixedRegion);
                 while (enumerator.MoveNext()) { }
-            
+
                 // Do in two pieces since z negative wraps/loops around
                 enumerator = CubemapToEquirectangularCpuNegativeZ(cameraPixels, pixelValues, stride, panoramaWidth, panoramaHeight, ssaaFactor, startTime, processingTimePerFrame, numPixelsAveraged,
                     startZNegative, endTopMixedRegion, panoramaWidth, startBottomMixedRegion);
