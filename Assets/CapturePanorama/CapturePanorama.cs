@@ -567,14 +567,11 @@ namespace CapturePanorama
             }
 
             List<ScreenFadeControl> fadeControls = new List<ScreenFadeControl>();
-            foreach (Camera c in Camera.allCameras)
+            foreach (Camera c in cameras)
             {
-                if (c.isActiveAndEnabled && c.targetTexture == null) // Is a camera visible to the player
-                {
-                    var fadeControl = c.gameObject.AddComponent<ScreenFadeControl>();
-                    fadeControl.fadeMaterial = fadeMaterial;
-                    fadeControls.Add(fadeControl);
-                }
+                var fadeControl = c.gameObject.AddComponent<ScreenFadeControl>();
+                fadeControl.fadeMaterial = fadeMaterial;
+                fadeControls.Add(fadeControl);
             }
             SetFadersEnabled(fadeControls, false);
 
@@ -1023,9 +1020,12 @@ namespace CapturePanorama
                 if (c.gameObject.name.Contains("RightEye"))
                     continue; // Only render left eyes
 #endif
-                finalCameras.Add(c);
+                if (c.isActiveAndEnabled && c.targetTexture == null) // Is a camera visible to the player
+                {
+                    finalCameras.Add(c);
+                }
             }
-
+            
             return finalCameras.ToArray();
         }
 
